@@ -1,30 +1,16 @@
 {
-  "name": "temp-app",
-  "version": "0.1.0",
+  "name": "smc-analyzer-root",
+  "version": "1.0.0",
   "private": true,
+  "description": "SMC Market Analyzer — Monorepo root (backend + frontend)",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "next": "16.3.1",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "lucide-react": "^1.16.0",
-    "lightweight-charts": "^4.2.1",
-    "clsx": "^2.1.1",
-    "tailwind-merge": "^3.0.1"
+    "dev": "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.1",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "concurrently": "^8.2.2"
   }
 }
