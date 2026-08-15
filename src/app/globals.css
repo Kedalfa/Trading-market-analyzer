@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --background: #090d16;
+    --surface: #0e1526;
+    --surface-elevated: #151f38;
+    --surface-border: #1f2d4e;
+    --primary: #3b82f6;
+    --primary-glow: rgba(59, 130, 246, 0.25);
+    --bullish: #10b981;
+    --bullish-glow: rgba(16, 185, 129, 0.2);
+    --bearish: #ef4444;
+    --bearish-glow: rgba(239, 68, 68, 0.2);
+    --warning: #f59e0b;
+    --purple: #8b5cf6;
+    --cyan: #06b6d4;
+    --text-main: #f1f5f9;
+    --text-muted: #94a3b8;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+  background: #1f2d4e;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+.terminal-panel {
+  background: linear-gradient(180deg, rgba(14, 21, 38, 0.95) 0%, rgba(9, 13, 22, 0.98) 100%);
+  border: 1px solid var(--surface-border);
+  backdrop-filter: blur(12px);
+}
+
+.glow-bullish {
+  box-shadow: 0 0 15px var(--bullish-glow);
+}
+
+.glow-bearish {
+  box-shadow: 0 0 15px var(--bearish-glow);
+}
+
+.glow-primary {
+  box-shadow: 0 0 15px var(--primary-glow);
+}
