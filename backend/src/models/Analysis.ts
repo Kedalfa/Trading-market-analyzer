@@ -1,46 +1,58 @@
 import { Schema, model, Document } from 'mongoose';
 
-// Subdocument schemas
-const scoreComponentSchema = new Schema({
-  category: String,
-  score: Number,
-  maxScore: Number,
-  weight: Number,
-  reason: String,
-  isPositive: Boolean,
-}, { _id: false });
+export interface IAuditEntry {
+  previousStatus: string;
+  newStatus: string;
+  timestamp: Date;
+  triggerPrice?: number;
+  triggerReason: string;
+  observedPrice?: number;
+  marketDataTimestamp?: number;
+}
 
-const scenarioTargetSchema = new Schema({
-  label: String,
-  price: Number,
-  description: String,
-}, { _id: false });
-
-const scenarioSchema = new Schema({
-  type: { type: String, enum: ['BULLISH', 'BEARISH', 'NEUTRAL'] },
-  probabilityGrade: String,
-  title: String,
-  narrative: String,
-  conditionsRequired: [String],
-  invalidationTrigger: String,
-  invalidationPrice: Number,
-  potentialTargets: [scenarioTargetSchema],
-  idealEntryZone: {
-    topPrice: Number,
-    bottomPrice: Number,
-    referenceZone: String,
+const auditEntrySchema = new Schema<IAuditEntry>(
+  {
+    previousStatus: { type: String, required: true },
+    newStatus: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    triggerPrice: Number,
+    triggerReason: { type: String, required: true },
+    observedPrice: Number,
+    marketDataTimestamp: Number,
   },
-}, { _id: false });
+  { _id: false }
+);
+
+export interface IAnalysisOutcome {
+  status: 'OPEN' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+  resolvedAt?: Date;
+  triggerPrice?: number;
+  triggerReason?: string;
+  observedPrice?: number;
+  timeToResolutionMinutes?: number;
+  maxFavorableExcursion?: number;
+  maxAdverseExcursion?: number;
+  notes?: string;
+  lastMonitoredAt?: Date;
+  monitoringStatus?: string;
+  auditTrail: IAuditEntry[];
+}
 
 export interface IAnalysis extends Document {
   analysisId: string;
-  userId?: string;         // optional for future multi-user support
+  userId?: string;
   symbol: string;
   instrumentId: string;
   timeframe: string;
   htfTimeframe: string;
   currentPrice: number;
   rulesetUsed: string;
+  direction: 'BULLISH' | 'BEARISH';
+  entryPrice: number;
+  stopLossPrice: number;
+  targetPrice: number;
+  invalidationPrice: number;
+  riskRewardRatio: number;
   htfBias: 'BULLISH' | 'BEARISH' | 'RANGING';
   intermediateStructure: 'BULLISH' | 'BEARISH' | 'RANGING';
   structuralEvidence: string[];
@@ -55,13 +67,8 @@ export interface IAnalysis extends Document {
   newsRiskWarning?: string;
   sessionNotes: string;
   savedAt: Date;
-  outcome?: {
-    status: 'OPEN' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED';
-    resolvedAt?: Date;
-    maxFavorableExcursion?: number;
-    maxAdverseExcursion?: number;
-    notes?: string;
-  };
+  expiresAt?: Date;
+  outcome: IAnalysisOutcome;
 }
 
 const analysisSchema = new Schema<IAnalysis>(
@@ -69,11 +76,17 @@ const analysisSchema = new Schema<IAnalysis>(
     analysisId: { type: String, required: true, unique: true, index: true },
     userId: { type: String, index: true },
     symbol: { type: String, required: true, index: true },
-    instrumentId: { type: String, required: true },
+    instrumentId: { type: String, required: true, index: true },
     timeframe: { type: String, required: true },
     htfTimeframe: { type: String, required: true },
     currentPrice: { type: Number, required: true },
     rulesetUsed: { type: String, required: true },
+    direction: { type: String, enum: ['BULLISH', 'BEARISH'], default: 'BULLISH', required: true },
+    entryPrice: { type: Number, required: true },
+    stopLossPrice: { type: Number, required: true },
+    targetPrice: { type: Number, required: true },
+    invalidationPrice: { type: Number, required: true },
+    riskRewardRatio: { type: Number, default: 2.0 },
     htfBias: { type: String, enum: ['BULLISH', 'BEARISH', 'RANGING'], required: true },
     intermediateStructure: { type: String, enum: ['BULLISH', 'BEARISH', 'RANGING'], required: true },
     structuralEvidence: [String],
@@ -88,18 +101,31 @@ const analysisSchema = new Schema<IAnalysis>(
     newsRiskWarning: String,
     sessionNotes: String,
     savedAt: { type: Date, default: Date.now },
+    expiresAt: Date,
     outcome: {
-      status: { type: String, enum: ['OPEN', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED'], default: 'OPEN' },
+      status: {
+        type: String,
+        enum: ['OPEN', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS', 'MONITORING_PAUSED'],
+        default: 'OPEN',
+        index: true,
+      },
       resolvedAt: Date,
+      triggerPrice: Number,
+      triggerReason: String,
+      observedPrice: Number,
+      timeToResolutionMinutes: Number,
       maxFavorableExcursion: Number,
       maxAdverseExcursion: Number,
       notes: String,
+      lastMonitoredAt: Date,
+      monitoringStatus: String,
+      auditTrail: [auditEntrySchema],
     },
   },
   { timestamps: true }
 );
 
-// Compound index for quick symbol+timeframe queries
 analysisSchema.index({ symbol: 1, timeframe: 1, savedAt: -1 });
+analysisSchema.index({ 'outcome.status': 1 });
 
 export const Analysis = model<IAnalysis>('Analysis', analysisSchema);

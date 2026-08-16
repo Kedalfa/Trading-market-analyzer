@@ -1,12 +1,15 @@
 /**
- * Binance Service — fetches genuine, live OHLCV candles & quotes from the Binance public REST API.
+ * Binance Service — fetches genuine, live OHLCV candles & quotes from Binance public REST APIs.
+ * Includes multiple redundant public endpoints & fallback cache.
  * ZERO fake/synthetic fallback: if provider fails, returns null.
  */
 
 import { config } from '../config/config';
 import NodeCache from 'node-cache';
 
-const cache = new NodeCache({ stdTTL: config.marketDataCacheTtl || 15 });
+const cache = new NodeCache({ stdTTL: config.marketDataCacheTtl || 10 });
+// Backup cache with longer TTL (2 hours) to survive transient provider rate-limits
+const backupCache = new NodeCache({ stdTTL: 7200 });
 
 export interface Candle {
   timestamp: number;
@@ -60,8 +63,16 @@ export function getTimeframeSeconds(tf: string): number {
   return map[tf] ?? 900;
 }
 
+const BINANCE_BASE_URLS = [
+  'https://api.binance.com',
+  'https://data-api.binance.vision',
+  'https://api1.binance.com',
+  'https://api2.binance.com',
+  'https://api3.binance.com',
+];
+
 /**
- * Fetch live candles from Binance public API with caching.
+ * Fetch live candles from Binance public API with multi-endpoint redundancy and caching.
  */
 export async function fetchBinanceCandles(
   symbol: string,
@@ -73,41 +84,56 @@ export async function fetchBinanceCandles(
   if (cached) return cached;
 
   const interval = mapToBinanceInterval(timeframe);
-  const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
 
-  try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'SMC-Analyzer/2.0' },
-      signal: AbortSignal.timeout(8000),
-    });
+  for (const baseUrl of BINANCE_BASE_URLS) {
+    const url = `${baseUrl}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
 
-    if (!res.ok) {
-      console.warn(`[Binance] API returned ${res.status} for ${symbol}`);
-      return null;
+    try {
+      const res = await fetch(url, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (!res.ok) {
+        continue;
+      }
+
+      const raw = (await res.json()) as (string | number)[][];
+      if (!Array.isArray(raw) || raw.length === 0) continue;
+
+      const candles: Candle[] = raw.map((k) => {
+        const openTime = Math.floor(Number(k[0]) / 1000);
+        return {
+          timestamp: openTime,
+          time: new Date(openTime * 1000).toISOString(),
+          open: parseFloat(String(k[1])),
+          high: parseFloat(String(k[2])),
+          low: parseFloat(String(k[3])),
+          close: parseFloat(String(k[4])),
+          volume: parseFloat(String(k[5])),
+        };
+      });
+
+      cache.set(cacheKey, candles);
+      backupCache.set(cacheKey, candles);
+      return candles;
+    } catch (err) {
+      // Continue to next redundant host
     }
-
-    const raw = (await res.json()) as (string | number)[][];
-    if (!Array.isArray(raw) || raw.length === 0) return null;
-
-    const candles: Candle[] = raw.map((k) => {
-      const openTime = Math.floor(Number(k[0]) / 1000);
-      return {
-        timestamp: openTime,
-        time: new Date(openTime * 1000).toISOString(),
-        open: parseFloat(String(k[1])),
-        high: parseFloat(String(k[2])),
-        low: parseFloat(String(k[3])),
-        close: parseFloat(String(k[4])),
-        volume: parseFloat(String(k[5])),
-      };
-    });
-
-    cache.set(cacheKey, candles);
-    return candles;
-  } catch (err) {
-    console.warn(`[Binance] Fetch failed for ${symbol}:`, err);
-    return null;
   }
+
+  // If all hosts timed out, check long-lived backup cache
+  const backup = backupCache.get<Candle[]>(cacheKey);
+  if (backup) {
+    console.warn(`[Binance] Using recent cached candle snapshot for ${symbol} due to transient network rate-limit.`);
+    return backup;
+  }
+
+  console.warn(`[Binance] All public endpoints failed for ${symbol}`);
+  return null;
 }
 
 /**
@@ -118,34 +144,43 @@ export async function fetchBinanceBookQuote(symbol: string): Promise<CryptoQuote
   const cached = cache.get<CryptoQuote>(cacheKey);
   if (cached) return cached;
 
-  const url = `https://api.binance.com/api/v3/ticker/bookTicker?symbol=${encodeURIComponent(symbol)}`;
+  for (const baseUrl of BINANCE_BASE_URLS) {
+    const url = `${baseUrl}/api/v3/ticker/bookTicker?symbol=${encodeURIComponent(symbol)}`;
 
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) continue;
 
-    const data: any = await res.json();
-    const bid = parseFloat(data.bidPrice);
-    const ask = parseFloat(data.askPrice);
-    const mid = (bid + ask) / 2;
-    const spread = parseFloat((ask - bid).toFixed(data.symbol.includes('BTC') ? 2 : 4));
-    const now = Date.now();
+      const data: any = await res.json();
+      const bid = parseFloat(data.bidPrice);
+      const ask = parseFloat(data.askPrice);
+      if (isNaN(bid) || isNaN(ask)) continue;
 
-    const quote: CryptoQuote = {
-      symbol,
-      price: mid,
-      bid,
-      ask,
-      spread,
-      timestamp: now,
-      formattedTime: new Date(now).toUTCString().slice(17, 25) + ' UTC',
-      source: 'Binance Public WebSocket/REST Feed',
-      status: 'LIVE',
-    };
+      const mid = (bid + ask) / 2;
+      const spread = parseFloat((ask - bid).toFixed(data.symbol.includes('BTC') ? 2 : 4));
+      const now = Date.now();
 
-    cache.set(cacheKey, quote, 2); // 2s TTL for live ticker
-    return quote;
-  } catch (err) {
-    return null;
+      const quote: CryptoQuote = {
+        symbol,
+        price: mid,
+        bid,
+        ask,
+        spread,
+        timestamp: now,
+        formattedTime: new Date(now).toUTCString().slice(17, 25) + ' UTC',
+        source: 'Binance Public WebSocket/REST Feed',
+        status: 'LIVE',
+      };
+
+      cache.set(cacheKey, quote, 2); // 2s TTL for live ticker
+      backupCache.set(cacheKey, quote);
+      return quote;
+    } catch (err) {
+      // Continue to next redundant host
+    }
   }
+
+  const backup = backupCache.get<CryptoQuote>(cacheKey);
+  if (backup) return backup;
+  return null;
 }

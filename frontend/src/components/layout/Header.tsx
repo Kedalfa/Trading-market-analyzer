@@ -1,12 +1,12 @@
 'use client';
 
-import React from 'react';
-import { Instrument, Timeframe } from '@/types/market';
+import React, { useState, useEffect } from 'react';
+import { Instrument } from '@/types/market';
 import { STRATEGY_RULESETS } from '@/engine/rulesets/smcRulesets';
 import { SessionStatus } from '@/types/session';
 import {
-  Activity, Clock, Upload, PlayCircle, BookOpen,
-  Shield, Cpu, HelpCircle, History
+  Activity, Clock, Upload, BookOpen,
+  Cpu, History, Send
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -18,11 +18,8 @@ interface HeaderProps {
   selectedRuleset: string;
   onSelectRuleset: (ruleId: string) => void;
   sessionStatus?: SessionStatus;
-  isReplayMode: boolean;
-  onToggleReplayMode: () => void;
   onOpenVisionModal: () => void;
-  onOpenEducationModal: () => void;
-  onOpenRiskModal: () => void;
+  onOpenTelegramModal: () => void;
   activeTab: 'analyzer' | 'history' | 'journal_export' | 'learn';
   setActiveTab: (tab: 'analyzer' | 'history' | 'journal_export' | 'learn') => void;
 }
@@ -38,31 +35,58 @@ export function Header({
   selectedRuleset,
   onSelectRuleset,
   sessionStatus,
-  isReplayMode,
-  onToggleReplayMode,
   onOpenVisionModal,
-  onOpenEducationModal,
-  onOpenRiskModal,
+  onOpenTelegramModal,
   activeTab,
   setActiveTab
 }: HeaderProps) {
+  // Real-time continuous timestamp clock (no drift, updates every 1000ms)
+  const [currentTimeStr, setCurrentTimeStr] = useState<string>('');
+  const [activeSessionName, setActiveSessionName] = useState<string>('Live Session');
+
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      const utcHours = now.getUTCHours();
+      const utcMinutes = now.getUTCMinutes();
+      const utcSeconds = now.getUTCSeconds();
+
+      // Format UTC time: HH:mm:ss UTC
+      const formatted = `${String(utcHours).padStart(2, '0')}:${String(utcMinutes).padStart(2, '0')}:${String(utcSeconds).padStart(2, '0')} UTC`;
+      setCurrentTimeStr(formatted);
+
+      // Determine active trading session dynamically
+      if (utcHours >= 13 && (utcHours < 16 || (utcHours === 16 && utcMinutes <= 30))) {
+        setActiveSessionName('London / NY Overlap');
+      } else if (utcHours >= 8 && utcHours < 17) {
+        setActiveSessionName('London Session');
+      } else if (utcHours >= 13 && utcHours < 22) {
+        setActiveSessionName('New York Session');
+      } else if (utcHours >= 0 && utcHours < 9) {
+        setActiveSessionName('Asian / Tokyo');
+      } else {
+        setActiveSessionName('After-Hours / Sydney');
+      }
+    };
+
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <header className="flex flex-col border-b border-[#1e293b] bg-[#0c1222] sticky top-0 z-30">
       {/* Top Main Navigation Bar */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-[#17223b]">
-        {/* Brand Logo & Platform Title */}
+        {/* Brand Logo & Clean Platform Title */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 shadow-lg shadow-blue-500/20">
             <Cpu className="w-5 h-5 text-white" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <span className="font-extrabold text-lg text-white tracking-tight">SMC Market Analyzer</span>
-              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                PRO TERMINAL
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400">Institutional Order Flow & AI Scenario Intelligence</p>
+            <h1 className="font-extrabold text-lg text-white tracking-tight leading-tight">
+              SMC Market Analyzer
+            </h1>
           </div>
         </div>
 
@@ -103,55 +127,37 @@ export function Header({
           </button>
         </nav>
 
-        {/* Right Quick Action Buttons */}
+        {/* Right Action Buttons */}
         <div className="flex items-center gap-3">
-          {/* Real-time Session Clock */}
+          {/* Real-time Timestamp Clock & Active Session */}
           <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#090f1d] border border-[#1f2d4e] text-xs">
-            <Clock className="w-3.5 h-3.5 text-blue-400" />
-            <span className="font-mono text-slate-300 font-medium">
-              {sessionStatus?.currentUtcTime || 'UTC CLOCK'}
+            <Clock className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
+            <span className="font-mono text-slate-200 font-semibold">
+              {currentTimeStr || sessionStatus?.currentUtcTime || 'UTC CLOCK'}
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800/50 font-medium">
+              {activeSessionName}
             </span>
           </div>
 
           {/* Chart Vision Upload */}
           <button
             onClick={onOpenVisionModal}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-semibold transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-semibold transition-all shadow-sm"
             title="Upload chart screenshot for vision analysis & conflict detection"
           >
             <Upload className="w-3.5 h-3.5" />
-            Chart Vision
+            <span>Chart Vision</span>
           </button>
 
-          {/* Backtest / Replay Mode */}
+          {/* Telegram AI Alerts Button */}
           <button
-            onClick={onToggleReplayMode}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-              isReplayMode
-                ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold shadow-md shadow-amber-500/30'
-                : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-700'
-            }`}
+            onClick={onOpenTelegramModal}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/40 text-xs font-semibold transition-all shadow-sm"
+            title="Configure Telegram AI Alerts & Watchlist"
           >
-            <PlayCircle className="w-3.5 h-3.5" />
-            {isReplayMode ? 'Replay Active' : 'Bar Replay'}
-          </button>
-
-          {/* Risk Calculator */}
-          <button
-            onClick={onOpenRiskModal}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold transition-all"
-          >
-            <Shield className="w-3.5 h-3.5" />
-            Risk & Trade Idea
-          </button>
-
-          {/* Educational Modal */}
-          <button
-            onClick={onOpenEducationModal}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
-            title="Explain SMC Concepts"
-          >
-            <HelpCircle className="w-4 h-4" />
+            <Send className="w-3.5 h-3.5 text-sky-400" />
+            <span>Telegram Bot</span>
           </button>
         </div>
       </div>

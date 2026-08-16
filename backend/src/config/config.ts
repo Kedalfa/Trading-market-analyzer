@@ -7,6 +7,8 @@ export const config = {
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
   marketDataCacheTtl: parseInt(process.env.MARKET_DATA_CACHE_TTL || '30', 10),
   newsCacheTtl: parseInt(process.env.NEWS_CACHE_TTL || '300', 10),
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '8845842296:AAFGUYzQWIVYqwHV3wybu4USxmQUMaC8VIg',
+  telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || 'Caleb_SMC_bot',
 };
 
 if (!config.mongoUri) {

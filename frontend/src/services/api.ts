@@ -89,22 +89,78 @@ export async function listAnalyses(params?: {
   symbol?: string;
   timeframe?: string;
   htfBias?: string;
+  direction?: string;
+  status?: string;
   grade?: string;
   limit?: number;
   skip?: number;
+  startDate?: string;
+  endDate?: string;
+  search?: string;
+  page?: number;
+  pageSize?: number;
 }) {
   const qs = new URLSearchParams();
   if (params?.symbol) qs.set('symbol', params.symbol);
   if (params?.timeframe) qs.set('timeframe', params.timeframe);
   if (params?.htfBias) qs.set('htfBias', params.htfBias);
+  if (params?.direction) qs.set('direction', params.direction);
+  if (params?.status) qs.set('status', params.status);
   if (params?.grade) qs.set('grade', params.grade);
+  if (params?.startDate) qs.set('startDate', params.startDate);
+  if (params?.endDate) qs.set('endDate', params.endDate);
+  if (params?.search) qs.set('search', params.search);
+  if (params?.page) qs.set('page', String(params.page));
+  if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
   if (params?.limit) qs.set('limit', String(params.limit));
   if (params?.skip) qs.set('skip', String(params.skip));
 
   const url = `/api/analyses${qs.toString() ? '?' + qs.toString() : ''}`;
   const res = await fetch(`${BASE_URL}${url}`, { headers: { 'Content-Type': 'application/json' } });
   const json = await res.json();
-  return { data: json.data as object[], total: json.total as number };
+  return {
+    data: json.data as object[],
+    total: (json.total as number) || 0,
+    page: (json.page as number) || 1,
+    pageSize: (json.pageSize as number) || 20,
+    totalPages: (json.totalPages as number) || 1,
+    summaryStats: json.summaryStats as {
+      totalTrades: number;
+      closedTrades: number;
+      openTrades: number;
+      winningTrades: number;
+      losingTrades: number;
+      breakEvenTrades: number;
+      winRate: number;
+      totalRealizedR: number;
+      avgPL: number;
+      avgRR: number;
+      largestWin: number;
+      largestLoss: number;
+      profitFactor: number;
+    } | undefined,
+  };
+}
+
+export function getExportAnalysesCsvUrl(params?: {
+  symbol?: string;
+  direction?: string;
+  status?: string;
+  timeframe?: string;
+  startDate?: string;
+  endDate?: string;
+  search?: string;
+}): string {
+  const qs = new URLSearchParams();
+  if (params?.symbol) qs.set('symbol', params.symbol);
+  if (params?.direction) qs.set('direction', params.direction);
+  if (params?.status) qs.set('status', params.status);
+  if (params?.timeframe) qs.set('timeframe', params.timeframe);
+  if (params?.startDate) qs.set('startDate', params.startDate);
+  if (params?.endDate) qs.set('endDate', params.endDate);
+  if (params?.search) qs.set('search', params.search);
+
+  return `${BASE_URL}/api/analyses/export${qs.toString() ? '?' + qs.toString() : ''}`;
 }
 
 export async function updateAnalysisOutcome(
@@ -124,6 +180,10 @@ export async function updateAnalysisOutcome(
 
 export async function deleteAnalysis(analysisId: string) {
   return apiFetch<{ message: string }>(`/api/analyses/${analysisId}`, { method: 'DELETE' });
+}
+
+export async function fetchSetupDetails(analysisId: string) {
+  return apiFetch<any>(`/api/analyses/${analysisId}/details`);
 }
 
 // ────────────────────────────────────────────────
@@ -200,6 +260,83 @@ export async function updateSettings(settings: Partial<UserSettingsResponse>) {
   return apiFetch<UserSettingsResponse>('/api/settings', {
     method: 'PUT',
     body: JSON.stringify(settings),
+  });
+}
+
+// ────────────────────────────────────────────────
+// Telegram Alert Bot API Endpoints
+// ────────────────────────────────────────────────
+export interface TelegramStatusResponse {
+  isConfigured: boolean;
+  botUsername: string;
+  isConnected: boolean;
+  telegramUsername?: string;
+  firstName?: string;
+  connectedAt?: string;
+  watchlist: string[];
+  settings: {
+    minQuality: 'HIGH' | 'HIGH_AND_WATCH';
+    timeframes: { htf: string; intermediate: string; setup: string; entry: string };
+    sessions: string[];
+    newsFilter: 'BLOCK_HIGH' | 'WARN_ONLY' | 'IGNORE';
+    alertTypes: Record<string, boolean>;
+    isMuted: boolean;
+    accountBalance?: number;
+    accountRiskPercent?: number;
+  };
+}
+
+export async function fetchTelegramStatus(): Promise<TelegramStatusResponse> {
+  return apiFetch<TelegramStatusResponse>('/api/telegram/status');
+}
+
+export async function generateTelegramCode(): Promise<{
+  code: string;
+  expiresAt: string;
+  directLink: string;
+  botUsername: string;
+  instructions: string;
+}> {
+  return apiFetch('/api/telegram/generate-code', { method: 'POST' });
+}
+
+export async function disconnectTelegram(): Promise<{ success: boolean; message: string }> {
+  return apiFetch('/api/telegram/disconnect', { method: 'POST' });
+}
+
+export async function updateTelegramSettings(payload: {
+  watchlist?: string[];
+  settings?: Partial<TelegramStatusResponse['settings']>;
+}): Promise<{ watchlist: string[]; settings: TelegramStatusResponse['settings'] }> {
+  return apiFetch('/api/telegram/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendTestTelegramAlert(): Promise<{ success: boolean; message: string }> {
+  return apiFetch('/api/telegram/test-alert', { method: 'POST' });
+}
+
+export async function fetchTelegramAlertLogs(): Promise<Array<{
+  setupId: string;
+  symbol: string;
+  alertType: string;
+  stage: string;
+  message: string;
+  deliveryStatus: string;
+  sentAt: string;
+}>> {
+  return apiFetch('/api/telegram/alerts');
+}
+
+// ────────────────────────────────────────────────
+// Chart Vision Independent Image Analysis API
+// ────────────────────────────────────────────────
+export async function analyzeChartScreenshotViaBackend(imageBase64: string): Promise<any> {
+  return apiFetch('/api/chart-vision/analyze', {
+    method: 'POST',
+    body: JSON.stringify({ imageBase64 }),
   });
 }
 

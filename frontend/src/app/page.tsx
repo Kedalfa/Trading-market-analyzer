@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Instrument, RealQuote } from '@/types/market';
+import { Candle, Instrument, RealQuote } from '@/types/market';
 import { FullSMCPipelineResult, runSMCPipeline } from '@/engine';
 import { StructuredSMCAnalysis } from '@/types/ai';
 import { generateStructuredSMCAnalysis } from '@/services/aiReasoningService';
@@ -26,6 +26,7 @@ import { AnalysisTimeline } from '@/components/timeline/AnalysisTimeline';
 import { EducationalModal } from '@/components/education/EducationalModal';
 import { VisionComparisonModal } from '@/components/vision/VisionComparisonModal';
 import { RiskCalculatorModal } from '@/components/risk/RiskCalculatorModal';
+import { TelegramConnectModal } from '@/components/telegram/TelegramConnectModal';
 import { ReplayController } from '@/components/replay/ReplayController';
 import { HistoryView } from '@/components/history/HistoryView';
 import { EDUCATIONAL_CONCEPTS } from '@/services/educationalService';
@@ -81,6 +82,7 @@ export default function SMCMarketAnalyzerApp() {
   const [selectedConceptId, setSelectedConceptId] = useState<string>('bos');
   const [isVisionOpen, setIsVisionOpen] = useState<boolean>(false);
   const [isRiskOpen, setIsRiskOpen] = useState<boolean>(false);
+  const [isTelegramOpen, setIsTelegramOpen] = useState<boolean>(false);
   const [riskInitialDirection, setRiskInitialDirection] = useState<'LONG' | 'SHORT'>('LONG');
 
   // ── Replay mode ──────────────────────────────────────────────────
@@ -201,21 +203,40 @@ export default function SMCMarketAnalyzerApp() {
     return () => { isMounted = false; };
   }, [selectedInstrument, selectedTimeframe, selectedRuleset, backendStatus]);
 
-  // ── 3. Real-Time Quote Streaming / Polling (Never Frozen) ─────────
+  // ── 3. Real-Time Quote Streaming / Polling (Never Frozen, 2s Freshness) ──
   useEffect(() => {
     if (!selectedInstrument || backendStatus !== 'connected' || isReplayMode) return;
 
     let isMounted = true;
-    const intervalMs = selectedInstrument.provider === 'binance' ? 2000 : 4000;
+    const intervalMs = selectedInstrument.provider === 'binance' ? 2000 : 2500;
 
     const pollQuote = async () => {
       try {
         const quote = await fetchRealtimeQuote(selectedInstrument.id);
-        if (isMounted && quote) {
+        if (isMounted && quote && quote.price) {
           setCurrentQuote(quote);
-          setLastDataUpdate(quote.timestamp);
+          setLastDataUpdate(quote.timestamp || Date.now());
           setDataStatus(quote.status || 'LIVE');
-          setIsRealTime(true);
+          setIsRealTime(quote.status !== 'MARKET_CLOSED');
+
+          // Incrementally update the latest candle in place without whole-chart reload
+          setPipelineResult(prev => {
+            if (!prev || !prev.candles || prev.candles.length === 0) return prev;
+            const last = prev.candles[prev.candles.length - 1];
+            const newPrice = quote.price;
+            const updatedLast: Candle = {
+              ...last,
+              close: newPrice,
+              high: Math.max(last.high, newPrice),
+              low: Math.min(last.low, newPrice),
+            };
+            const newCandles = [...prev.candles.slice(0, -1), updatedLast];
+            return {
+              ...prev,
+              candles: newCandles,
+              currentPrice: newPrice,
+            };
+          });
         }
       } catch (err) {
         // Silent catch for background quote polling
@@ -243,6 +264,15 @@ export default function SMCMarketAnalyzerApp() {
   const handleSaveAnalysis = async () => {
     if (!analysis || !selectedInstrument) return;
     try {
+      const isBull = analysis.marketOverview.htfBias === 'BULLISH';
+      const scenario = isBull ? analysis.scenarios.bullish : analysis.scenarios.bearish;
+      const entry = isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice;
+      const stop = scenario.invalidationPrice;
+      const target = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price || (isBull ? entry * 1.02 : entry * 0.98);
+      const risk = Math.abs(entry - stop);
+      const reward = Math.abs(target - entry);
+      const rr = risk > 0 ? Number((reward / risk).toFixed(2)) : 2.0;
+
       await saveAnalysis({
         analysisId: analysis.analysisId,
         symbol: analysis.symbol,
@@ -250,6 +280,12 @@ export default function SMCMarketAnalyzerApp() {
         timeframe: analysis.timeframeHierarchy.intermediate,
         htfTimeframe: analysis.timeframeHierarchy.higher,
         currentPrice: currentQuote?.price ?? analysis.currentPrice,
+        direction: isBull ? 'BULLISH' : 'BEARISH',
+        entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        riskRewardRatio: rr,
         rulesetUsed: selectedRuleset,
         htfBias: analysis.marketOverview.htfBias,
         intermediateStructure: analysis.marketOverview.intermediateStructure,
@@ -261,11 +297,23 @@ export default function SMCMarketAnalyzerApp() {
         newsRiskWarning: analysis.newsContext.riskWarning,
         sessionNotes: analysis.sessionContext.sessionNotes ?? '',
         savedAt: new Date().toISOString(),
-        outcome: { status: 'OPEN' },
+        outcome: {
+          status: 'OPEN',
+          monitoringStatus: 'Active Background Monitoring Initialized',
+          auditTrail: [
+            {
+              previousStatus: 'NEW',
+              newStatus: 'OPEN',
+              timestamp: new Date().toISOString(),
+              triggerReason: 'Initial analysis snapshot saved to database',
+              observedPrice: currentQuote?.price ?? analysis.currentPrice,
+            },
+          ],
+        },
       });
-      console.log('[Analysis] Saved to MongoDB');
+      console.log('[Analysis] Saved snapshot to MongoDB');
     } catch (err) {
-      console.error('[Analysis] Failed to save:', err);
+      console.error('[Analysis] Failed to save snapshot:', err);
     }
   };
 
@@ -323,11 +371,8 @@ export default function SMCMarketAnalyzerApp() {
           selectedRuleset={selectedRuleset}
           onSelectRuleset={setSelectedRuleset}
           sessionStatus={pipelineResult?.sessionStatus}
-          isReplayMode={isReplayMode}
-          onToggleReplayMode={() => setIsReplayMode(!isReplayMode)}
           onOpenVisionModal={() => setIsVisionOpen(true)}
-          onOpenEducationModal={() => handleOpenConcept('bos')}
-          onOpenRiskModal={() => setIsRiskOpen(true)}
+          onOpenTelegramModal={() => setIsTelegramOpen(true)}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
         />
@@ -460,7 +505,11 @@ export default function SMCMarketAnalyzerApp() {
       <VisionComparisonModal
         isOpen={isVisionOpen}
         onClose={() => setIsVisionOpen(false)}
-        pipeline={pipelineResult}
+      />
+
+      <TelegramConnectModal
+        isOpen={isTelegramOpen}
+        onClose={() => setIsTelegramOpen(false)}
       />
 
       {analysis && selectedInstrument && (

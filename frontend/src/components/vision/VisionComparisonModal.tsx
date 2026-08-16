@@ -1,27 +1,25 @@
 'use client';
 
 import React, { useState } from 'react';
-import { FullSMCPipelineResult } from '@/engine';
 import { analyzeChartScreenshot, VisionAnalysisMode } from '@/services/visionService';
 import {
   VisionAnalysisResult,
   VisionAnnotationItem,
   VisionSetup,
-  AnnotationType
 } from '@/types/vision';
 import {
   X, Upload, RefreshCw, Eye, Layers, CheckCircle2,
   AlertTriangle, Shield, TrendingUp, Target, ArrowRight,
-  Info, Sparkles, Sliders, CheckSquare, Square, Zap
+  Info, Sparkles, Sliders, CheckSquare, Square, Zap,
+  FileImage, Clock, Compass, HelpCircle, Activity
 } from 'lucide-react';
 
 interface VisionComparisonModalProps {
   isOpen: boolean;
   onClose: () => void;
-  pipeline?: FullSMCPipelineResult | null;
 }
 
-export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionComparisonModalProps) {
+export function VisionComparisonModal({ isOpen, onClose }: VisionComparisonModalProps) {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<VisionAnalysisResult | null>(null);
@@ -42,6 +40,10 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      // Clear previous results immediately
+      setAnalysisResult(null);
+      setSelectedAnnotation(null);
+
       const reader = new FileReader();
       reader.onloadend = () => {
         const base64 = reader.result as string;
@@ -56,7 +58,7 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
     setIsAnalyzing(true);
     setSelectedAnnotation(null);
     try {
-      const result = await analyzeChartScreenshot(base64, pipeline, mode);
+      const result = await analyzeChartScreenshot(base64, mode);
       setAnalysisResult(result);
       if (result.annotations.length > 0) {
         setSelectedAnnotation(result.annotations[0]);
@@ -66,6 +68,12 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
     } finally {
       setIsAnalyzing(false);
     }
+  };
+
+  const handleReset = () => {
+    setImagePreview(null);
+    setAnalysisResult(null);
+    setSelectedAnnotation(null);
   };
 
   const toggleLayer = (layerKey: keyof typeof visibleLayers) => {
@@ -84,8 +92,8 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
   }) || [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-5">
-      <div className="flex flex-col w-full max-w-6xl h-[92vh] bg-[#0b101d] border border-[#1e293b] rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-5 animate-fadeIn">
+      <div className="flex flex-col w-full max-w-6xl h-[94vh] bg-[#0b101d] border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#1e293b] bg-[#0e1628]">
           <div className="flex items-center gap-3">
@@ -94,13 +102,13 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white">Chart Vision SMC Detection & Interactive Overlay</h2>
+                <h2 className="text-base font-bold text-white">Chart Vision — Isolated Screenshot Analysis</h2>
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  VISUAL AI + DETERMINISTIC SMC
+                  PURE IMAGE PARSER
                 </span>
               </div>
               <p className="text-[11px] text-slate-400">
-                Upload any chart image to extract, annotate, and explain SMC structures interactively
+                100% independent visual SMC extraction (No live terminal bleed or pre-configured values)
               </p>
             </div>
           </div>
@@ -113,38 +121,53 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
           </button>
         </div>
 
-        {/* Distinction Banner: Screenshot Analysis vs Current Market Feed */}
+        {/* Screenshot Metadata Bar */}
         <div className="flex flex-wrap items-center justify-between px-5 py-2 bg-[#080d19] border-b border-[#17223b] text-xs gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="px-2 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-800/60 font-bold text-[11px]">
-              📷 Screenshot Analysis
+              📷 Uploaded Image Context
             </span>
-            <span className="text-slate-400">
-              This analysis describes the technical structures shown in the uploaded screenshot.
-            </span>
+            {analysisResult ? (
+              <>
+                <span className="text-slate-300 font-semibold">
+                  Asset: <strong className="text-white">{analysisResult.symbolDetected}</strong>
+                </span>
+                <span className="text-slate-500">|</span>
+                <span className="text-slate-300">
+                  Timeframe: <strong className="text-white">{analysisResult.timeframeDetected}</strong>
+                </span>
+                <span className="text-slate-500">|</span>
+                <span className="text-slate-300">
+                  Trend: <strong className={analysisResult.visibleTrend === 'BULLISH' ? 'text-emerald-400' : analysisResult.visibleTrend === 'BEARISH' ? 'text-rose-400' : 'text-amber-400'}>{analysisResult.visibleTrend}</strong>
+                </span>
+              </>
+            ) : (
+              <span className="text-slate-500">Awaiting chart image upload…</span>
+            )}
           </div>
 
-          {pipeline && (
-            <div className="flex items-center gap-2 text-[11px] text-slate-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span>Current Live Terminal Asset: <strong className="text-slate-200">{pipeline.instrument.symbol}</strong> ({pipeline.timeframe})</span>
-            </div>
+          {imagePreview && (
+            <button
+              onClick={handleReset}
+              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-colors"
+            >
+              Upload Different Chart
+            </button>
           )}
         </div>
 
         {/* Modal Main Content */}
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-          {/* Left Column: Interactive Canvas & Action Controls */}
+          {/* Left Column: Image Canvas & Interactive Annotations */}
           <div className="flex-1 flex flex-col p-4 border-r border-[#1e293b] overflow-y-auto space-y-4">
-            {/* Upload Area (when no image) */}
             {!imagePreview ? (
               <label className="flex-1 flex flex-col items-center justify-center p-10 border-2 border-dashed border-slate-700 hover:border-indigo-500 rounded-2xl bg-[#090e1a] cursor-pointer transition-all min-h-[350px]">
                 <div className="p-4 rounded-full bg-indigo-950/50 border border-indigo-500/30 text-indigo-400 mb-3">
                   <Upload className="w-8 h-8" />
                 </div>
-                <strong className="text-slate-200 text-base">Upload Chart Screenshot</strong>
+                <strong className="text-slate-200 text-base">Upload Any Chart Screenshot</strong>
                 <span className="text-slate-500 text-xs mt-1 text-center max-w-sm">
-                  TradingView, MetaTrader, or custom chart images (PNG, JPG, WebP). Full SMC structures will be detected and annotated.
+                  TradingView, MetaTrader, or custom chart images (PNG, JPG, WebP). Candle structures and SMC zones will be extracted dynamically from the image.
                 </span>
                 <input
                   type="file"
@@ -155,235 +178,90 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
               </label>
             ) : (
               <>
-                {/* Action Controls Toolbar */}
+                {/* Layer Visibility Toggles */}
                 <div className="flex flex-wrap items-center justify-between gap-2 p-2 rounded-xl bg-[#0e1628] border border-slate-800 text-xs">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      onClick={() => runAnalysis(imagePreview, 'FULL')}
-                      disabled={isAnalyzing}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all shadow-sm"
-                    >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      Run Full SMC Analysis
-                    </button>
-
-                    <button
-                      onClick={() => runAnalysis(imagePreview, 'STRUCTURE')}
-                      disabled={isAnalyzing}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
-                    >
-                      Structure (BOS/MSS)
-                    </button>
-
-                    <button
-                      onClick={() => runAnalysis(imagePreview, 'FVG')}
-                      disabled={isAnalyzing}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
-                    >
-                      FVGs
-                    </button>
-
-                    <button
-                      onClick={() => runAnalysis(imagePreview, 'ORDER_BLOCKS')}
-                      disabled={isAnalyzing}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
-                    >
-                      Order Blocks
-                    </button>
-
-                    <button
-                      onClick={() => runAnalysis(imagePreview, 'SETUP')}
-                      disabled={isAnalyzing}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
-                    >
-                      Find Potential Setup
-                    </button>
+                    <span className="text-slate-400 font-semibold mr-1">Overlay Layers:</span>
+                    {[
+                      { key: 'structure', label: 'Swings & BOS', color: 'blue' },
+                      { key: 'liquidity', label: 'Liquidity ⚡', color: 'amber' },
+                      { key: 'fvg', label: 'FVG Imbalance', color: 'emerald' },
+                      { key: 'orderBlocks', label: 'Order Blocks', color: 'purple' },
+                      { key: 'dealingRange', label: 'Dealing Range EQ', color: 'cyan' },
+                      { key: 'setup', label: 'Setup Zone', color: 'indigo' },
+                    ].map(layer => {
+                      const isActive = visibleLayers[layer.key as keyof typeof visibleLayers];
+                      return (
+                        <button
+                          key={layer.key}
+                          onClick={() => toggleLayer(layer.key as keyof typeof visibleLayers)}
+                          className={`px-2 py-1 rounded text-[11px] font-semibold transition-all flex items-center gap-1 ${
+                            isActive
+                              ? 'bg-blue-600/30 text-blue-300 border border-blue-500/50'
+                              : 'bg-slate-800/40 text-slate-500 border border-transparent'
+                          }`}
+                        >
+                          {isActive ? <CheckSquare className="w-3 h-3 text-blue-400" /> : <Square className="w-3 h-3 text-slate-600" />}
+                          {layer.label}
+                        </button>
+                      );
+                    })}
                   </div>
-
-                  <label className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-800 text-slate-400 hover:text-slate-200 cursor-pointer font-medium">
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Upload New</span>
-                    <input type="file" accept="image/*" onChange={handleFileUpload} className="hidden" />
-                  </label>
                 </div>
 
-                {/* Layer Visibility Toggles */}
-                <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl bg-[#090e1a] border border-[#1e293b] text-xs">
-                  <span className="text-slate-500 font-bold flex items-center gap-1 mr-1">
-                    <Sliders className="w-3.5 h-3.5" /> Layers:
-                  </span>
-
-                  {[
-                    { key: 'structure', label: 'Market Structure' },
-                    { key: 'liquidity', label: 'Liquidity & Sweeps' },
-                    { key: 'fvg', label: 'Fair Value Gaps' },
-                    { key: 'orderBlocks', label: 'Order Blocks' },
-                    { key: 'dealingRange', label: 'Dealing Range' },
-                    { key: 'setup', label: 'Potential Setup' },
-                  ].map(l => {
-                    const isActive = visibleLayers[l.key as keyof typeof visibleLayers];
-                    return (
-                      <button
-                        key={l.key}
-                        onClick={() => toggleLayer(l.key as keyof typeof visibleLayers)}
-                        className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all flex items-center gap-1.5 ${
-                          isActive
-                            ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
-                            : 'bg-slate-900 text-slate-500 border border-slate-800 hover:text-slate-400'
-                        }`}
-                      >
-                        <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-blue-400' : 'bg-slate-600'}`} />
-                        {l.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Interactive Chart Vision Image & SVG Annotation Canvas */}
-                <div className="relative rounded-xl overflow-hidden border border-slate-700 bg-black flex-1 min-h-[380px] max-h-[520px] flex items-center justify-center select-none group">
-                  {/* Base Screenshot */}
-                  <img
-                    src={imagePreview}
-                    alt="Uploaded Chart"
-                    className="object-contain w-full h-full max-h-[520px]"
-                  />
-
-                  {/* Loading Spinner during analysis */}
+                {/* Interactive Image & SVG Canvas */}
+                <div className="relative flex-1 rounded-xl bg-[#060a12] border border-slate-800 overflow-hidden flex items-center justify-center min-h-[380px]">
                   {isAnalyzing && (
-                    <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center space-y-3 z-30">
+                    <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm space-y-3">
                       <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin" />
-                      <span className="text-white font-bold text-sm">Performing Computer Vision & SMC Detection…</span>
-                      <span className="text-slate-400 text-xs">Swings • Liquidity Pools • FVGs • Order Blocks • Scenarios</span>
+                      <strong className="text-white text-sm">Analyzing Screenshot Structure…</strong>
+                      <span className="text-slate-400 text-xs">Extracting candles, swings, imbalances, and dealing ranges</span>
                     </div>
                   )}
 
-                  {/* SVG Interactive Overlay */}
-                  {!isAnalyzing && analysisResult && (
-                    <svg
-                      viewBox="0 0 100 100"
-                      preserveAspectRatio="none"
-                      className="absolute inset-0 w-full h-full pointer-events-auto"
-                    >
-                      {/* 1. Dealing Range Equilibrium */}
-                      {visibleLayers.dealingRange && (
-                        <g className="cursor-pointer" onClick={() => setSelectedAnnotation(analysisResult.annotations.find(a => a.type === 'DEALING_RANGE') || null)}>
-                          <line x1="0" y1="50" x2="100" y2="50" stroke="#38bdf8" strokeWidth="0.5" strokeDasharray="1.5 1" opacity="0.8" />
-                          <rect x="2" y="48" width="18" height="4" rx="0.5" fill="#0b101d" stroke="#38bdf8" strokeWidth="0.3" />
-                          <text x="11" y="50.8" fill="#38bdf8" fontSize="2.2" fontWeight="bold" textAnchor="middle">EQ 50%</text>
-                        </g>
-                      )}
+                  {/* Uploaded Chart Image */}
+                  <img
+                    src={imagePreview}
+                    alt="Uploaded chart"
+                    className="w-full h-full object-contain max-h-[520px]"
+                  />
 
-                      {/* 2. Order Blocks & FVG Imbalance Boxes */}
-                      {filteredAnnotations.map(ann => {
-                        if (ann.type === 'FVG' && ann.coordinates.widthPct && ann.coordinates.heightPct) {
-                          const isSelected = selectedAnnotation?.id === ann.id;
-                          return (
-                            <g key={ann.id} className="cursor-pointer" onClick={() => setSelectedAnnotation(ann)}>
-                              <rect
-                                x={ann.coordinates.xPct}
-                                y={ann.coordinates.yPct}
-                                width={ann.coordinates.widthPct}
-                                height={ann.coordinates.heightPct}
-                                fill="rgba(16, 185, 129, 0.2)"
-                                stroke={isSelected ? '#38bdf8' : '#10b981'}
-                                strokeWidth={isSelected ? '0.8' : '0.4'}
-                                strokeDasharray={isSelected ? 'none' : '1 0.5'}
-                              />
-                              <text
-                                x={ann.coordinates.xPct + 1}
-                                y={ann.coordinates.yPct + 3}
-                                fill="#10b981"
-                                fontSize="2.2"
-                                fontWeight="bold"
-                              >
-                                {ann.label}
-                              </text>
-                            </g>
-                          );
-                        }
+                  {/* SVG Overlay using exact percentage coordinates from image parser */}
+                  {analysisResult && (
+                    <svg className="absolute inset-0 w-full h-full pointer-events-none">
+                      {filteredAnnotations.map((ann) => {
+                        const isSelected = selectedAnnotation?.id === ann.id;
 
-                        if (ann.type === 'ORDER_BLOCK' && ann.coordinates.widthPct && ann.coordinates.heightPct) {
-                          const isSelected = selectedAnnotation?.id === ann.id;
-                          return (
-                            <g key={ann.id} className="cursor-pointer" onClick={() => setSelectedAnnotation(ann)}>
-                              <rect
-                                x={ann.coordinates.xPct}
-                                y={ann.coordinates.yPct}
-                                width={ann.coordinates.widthPct}
-                                height={ann.coordinates.heightPct}
-                                fill="rgba(139, 92, 246, 0.25)"
-                                stroke={isSelected ? '#38bdf8' : '#8b5cf6'}
-                                strokeWidth={isSelected ? '0.8' : '0.4'}
-                              />
-                              <text
-                                x={ann.coordinates.xPct + 1}
-                                y={ann.coordinates.yPct + 3}
-                                fill="#a78bfa"
-                                fontSize="2.2"
-                                fontWeight="bold"
-                              >
-                                {ann.label}
-                              </text>
-                            </g>
-                          );
-                        }
-
-                        if (ann.type === 'POTENTIAL_SETUP' && ann.coordinates.widthPct && ann.coordinates.heightPct) {
-                          return (
-                            <g key={ann.id} className="cursor-pointer" onClick={() => setSelectedAnnotation(ann)}>
-                              <rect
-                                x={ann.coordinates.xPct}
-                                y={ann.coordinates.yPct}
-                                width={ann.coordinates.widthPct}
-                                height={ann.coordinates.heightPct}
-                                fill="rgba(56, 189, 248, 0.15)"
-                                stroke="#38bdf8"
-                                strokeWidth="0.6"
-                                strokeDasharray="1 1"
-                              />
-                              <rect x={ann.coordinates.xPct} y={ann.coordinates.yPct - 3.5} width="22" height="3.5" rx="0.5" fill="#0369a1" />
-                              <text x={ann.coordinates.xPct + 11} y={ann.coordinates.yPct - 1} fill="#ffffff" fontSize="2" fontWeight="bold" textAnchor="middle">
-                                {ann.label}
-                              </text>
-                            </g>
-                          );
-                        }
-
-                        // Lines: BOS, Liquidity, Sweeps
-                        if (ann.coordinates.x2Pct != null && ann.coordinates.y2Pct != null) {
-                          const isSelected = selectedAnnotation?.id === ann.id;
-                          const isSweep = ann.type === 'LIQUIDITY_SWEEP';
-                          const isBSL = ann.type === 'LIQUIDITY_POOL';
-                          const strokeColor = isSweep ? '#f59e0b' : isBSL ? '#38bdf8' : '#10b981';
+                        // 1. Box Annotations (FVG, Order Blocks, Setup Zone)
+                        if (ann.coordinates.widthPct && ann.coordinates.heightPct) {
+                          const isBull = ann.label.includes('+') || ann.label.includes('Bullish');
+                          const isSetup = ann.type === 'POTENTIAL_SETUP';
+                          const strokeColor = isSetup ? '#818cf8' : ann.category === 'Imbalance' ? (isBull ? '#10b981' : '#ef4444') : '#a855f7';
+                          const fillColor = isSetup ? 'rgba(99, 102, 241, 0.20)' : ann.category === 'Imbalance' ? (isBull ? 'rgba(16, 185, 129, 0.18)' : 'rgba(239, 68, 68, 0.18)') : 'rgba(168, 85, 247, 0.18)';
 
                           return (
-                            <g key={ann.id} className="cursor-pointer" onClick={() => setSelectedAnnotation(ann)}>
-                              <line
-                                x1={ann.coordinates.xPct}
-                                y1={ann.coordinates.yPct}
-                                x2={ann.coordinates.x2Pct}
-                                y2={ann.coordinates.y2Pct}
-                                stroke={isSelected ? '#ffffff' : strokeColor}
-                                strokeWidth={isSweep ? '0.7' : '0.5'}
-                                strokeDasharray={isSweep ? '1.5 1' : '1 1'}
-                              />
+                            <g
+                              key={ann.id}
+                              className="pointer-events-auto cursor-pointer"
+                              onClick={() => setSelectedAnnotation(ann)}
+                            >
                               <rect
-                                x={(ann.coordinates.xPct + ann.coordinates.x2Pct) / 2 - 10}
-                                y={ann.coordinates.yPct - 2.5}
-                                width="20"
-                                height="3.5"
-                                rx="0.5"
-                                fill="#0b101d"
+                                x={`${ann.coordinates.xPct}%`}
+                                y={`${ann.coordinates.yPct}%`}
+                                width={`${ann.coordinates.widthPct}%`}
+                                height={`${ann.coordinates.heightPct}%`}
+                                fill={fillColor}
                                 stroke={strokeColor}
-                                strokeWidth="0.3"
+                                strokeWidth={isSelected ? '2.5' : '1.5'}
+                                strokeDasharray={isSetup ? '4 2' : 'none'}
+                                rx="3"
                               />
                               <text
-                                x={(ann.coordinates.xPct + ann.coordinates.x2Pct) / 2}
-                                y={ann.coordinates.yPct - 0.2}
+                                x={`${ann.coordinates.xPct + 1}%`}
+                                y={`${ann.coordinates.yPct + 4}%`}
                                 fill={strokeColor}
-                                fontSize="2"
+                                fontSize="10"
                                 fontWeight="bold"
-                                textAnchor="middle"
                               >
                                 {ann.label}
                               </text>
@@ -391,27 +269,32 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
                           );
                         }
 
-                        // Points: Swings
-                        if (ann.type === 'SWING_HIGH' || ann.type === 'SWING_LOW') {
-                          const isHigh = ann.type === 'SWING_HIGH';
-                          const isSelected = selectedAnnotation?.id === ann.id;
+                        // 2. Line Annotations (BOS, MSS, Liquidity Pools, Dealing Range EQ)
+                        if (ann.coordinates.x2Pct !== undefined && ann.coordinates.y2Pct !== undefined) {
+                          const isEQ = ann.type === 'DEALING_RANGE';
+                          const strokeColor = isEQ ? '#38bdf8' : ann.type === 'BOS' ? '#10b981' : ann.type === 'MSS' ? '#f59e0b' : '#f43f5e';
+
                           return (
-                            <g key={ann.id} className="cursor-pointer" onClick={() => setSelectedAnnotation(ann)}>
-                              <circle
-                                cx={ann.coordinates.xPct}
-                                cy={ann.coordinates.yPct}
-                                r={isSelected ? '1.5' : '1'}
-                                fill={isHigh ? '#38bdf8' : '#f43f5e'}
-                                stroke="#ffffff"
-                                strokeWidth="0.2"
+                            <g
+                              key={ann.id}
+                              className="pointer-events-auto cursor-pointer"
+                              onClick={() => setSelectedAnnotation(ann)}
+                            >
+                              <line
+                                x1={`${ann.coordinates.xPct}%`}
+                                y1={`${ann.coordinates.yPct}%`}
+                                x2={`${ann.coordinates.x2Pct}%`}
+                                y2={`${ann.coordinates.y2Pct}%`}
+                                stroke={strokeColor}
+                                strokeWidth={isSelected ? '2.5' : '1.5'}
+                                strokeDasharray={isEQ ? '4 4' : '2 2'}
                               />
                               <text
-                                x={ann.coordinates.xPct}
-                                y={isHigh ? ann.coordinates.yPct - 2 : ann.coordinates.yPct + 3.5}
-                                fill={isHigh ? '#38bdf8' : '#f43f5e'}
-                                fontSize="2.2"
+                                x={`${ann.coordinates.xPct + 2}%`}
+                                y={`${ann.coordinates.yPct - 1.5}%`}
+                                fill={strokeColor}
+                                fontSize="10"
                                 fontWeight="bold"
-                                textAnchor="middle"
                               >
                                 {ann.label}
                               </text>
@@ -419,7 +302,36 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
                           );
                         }
 
-                        return null;
+                        // 3. Point Pivot Annotations (Swing High / Swing Low)
+                        const isHigh = ann.type === 'SWING_HIGH';
+                        const color = isHigh ? '#38bdf8' : '#f43f5e';
+
+                        return (
+                          <g
+                            key={ann.id}
+                            className="pointer-events-auto cursor-pointer"
+                            onClick={() => setSelectedAnnotation(ann)}
+                          >
+                            <circle
+                              cx={`${ann.coordinates.xPct}%`}
+                              cy={`${ann.coordinates.yPct}%`}
+                              r={isSelected ? '6' : '4'}
+                              fill={color}
+                              stroke="#ffffff"
+                              strokeWidth="1"
+                            />
+                            <text
+                              x={`${ann.coordinates.xPct}%`}
+                              y={`${isHigh ? ann.coordinates.yPct - 3 : ann.coordinates.yPct + 4}%`}
+                              fill={color}
+                              fontSize="10"
+                              fontWeight="bold"
+                              textAnchor="middle"
+                            >
+                              {ann.label}
+                            </text>
+                          </g>
+                        );
                       })}
                     </svg>
                   )}
@@ -428,136 +340,116 @@ export function VisionComparisonModal({ isOpen, onClose, pipeline }: VisionCompa
             )}
           </div>
 
-          {/* Right Column: Interactive Click-to-Explain Card & Setup Detection Breakdown */}
-          <div className="w-full md:w-96 flex flex-col p-4 bg-[#090e1a] overflow-y-auto space-y-4 text-xs">
-            {/* Selected Annotation Details Card */}
-            {selectedAnnotation ? (
-              <div className="p-4 rounded-xl bg-[#0e1628] border border-blue-500/40 space-y-3 shadow-lg">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <span className="p-1 rounded bg-blue-600/20 text-blue-400">
-                      <Info className="w-4 h-4" />
-                    </span>
-                    <strong className="text-white text-sm">{selectedAnnotation.label}</strong>
-                  </div>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                    {selectedAnnotation.confidence} CONFIDENCE
-                  </span>
-                </div>
-
-                {selectedAnnotation.subLabel && (
-                  <p className="text-slate-300 font-medium text-xs">{selectedAnnotation.subLabel}</p>
-                )}
-
-                {/* Price / Bounds Fact */}
-                {selectedAnnotation.priceRange && (
-                  <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] font-mono">
-                    <span className="text-slate-400 block text-[10px]">Zone Bounds:</span>
-                    <strong className="text-blue-300">{selectedAnnotation.priceRange.bottom.toFixed(5)} — {selectedAnnotation.priceRange.top.toFixed(5)}</strong>
-                  </div>
-                )}
-
-                {selectedAnnotation.priceLevel && (
-                  <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] font-mono">
-                    <span className="text-slate-400 block text-[10px]">Reference Level:</span>
-                    <strong className="text-blue-300">{selectedAnnotation.priceLevel.toFixed(5)}</strong>
-                  </div>
-                )}
-
-                {/* Detection Formula & Why Detected */}
-                <div className="space-y-1 text-[11px]">
-                  <span className="text-slate-400 font-semibold block">SMC Detection Logic:</span>
-                  <p className="text-slate-300 leading-relaxed bg-black/30 p-2 rounded border border-slate-800">
-                    {selectedAnnotation.whyDetected}
-                  </p>
-                </div>
-
-                {/* Status & Structural Meaning */}
-                <div className="space-y-1 text-[11px]">
-                  <span className="text-slate-400 font-semibold block">Status & Confluence:</span>
-                  <div className="flex items-start gap-1.5 text-emerald-300">
-                    <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    <span>{selectedAnnotation.status}</span>
-                  </div>
-                  {selectedAnnotation.relatedStructure && (
-                    <p className="text-slate-400 text-[10px] mt-1 pl-5">
-                      {selectedAnnotation.relatedStructure}
-                    </p>
-                  )}
-                </div>
+          {/* Right Column: Screenshot-Specific Analysis Panel (Scrollable) */}
+          <div className="w-full md:w-[380px] lg:w-[420px] bg-[#090e1a] p-4 flex flex-col space-y-4 overflow-y-auto border-t md:border-t-0 md:border-l border-[#1e293b]">
+            {!analysisResult ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-2">
+                <Eye className="w-10 h-10 text-slate-600 animate-pulse" />
+                <h3 className="text-slate-300 font-bold text-sm">No Chart Uploaded</h3>
+                <p className="text-xs">Upload a chart image to view the screenshot-derived SMC analysis panel.</p>
               </div>
             ) : (
-              <div className="p-6 text-center rounded-xl bg-[#0e1628] border border-slate-800 space-y-2">
-                <Info className="w-8 h-8 text-slate-600 mx-auto" />
-                <strong className="text-slate-300 block">Click Any Annotation on Chart</strong>
-                <p className="text-slate-500 text-xs">
-                  Click on any detected BOS, FVG, Order Block, or Liquidity Pool on the image to view technical explanations.
-                </p>
-              </div>
-            )}
-
-            {/* Potential Setup Breakdown */}
-            {analysisResult?.setup && (
-              <div className="p-4 rounded-xl bg-[#0e1628] border border-[#1e293b] space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                  <div className="flex items-center gap-1.5">
-                    <Zap className="w-4 h-4 text-amber-400" />
-                    <strong className="text-white text-xs">{analysisResult.setup.title}</strong>
-                  </div>
-                  <span className="font-mono text-emerald-400 font-bold text-xs">
-                    {analysisResult.setup.riskRewardRatio}R
-                  </span>
-                </div>
-
-                {/* Sizing & Levels */}
-                <div className="grid grid-cols-3 gap-1.5 text-center text-[10px]">
-                  <div className="p-1.5 rounded bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400 block">Entry Zone</span>
-                    <strong className="text-blue-300 font-mono">{analysisResult.setup.entryZone.topPrice}</strong>
-                  </div>
-                  <div className="p-1.5 rounded bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400 block">Invalidation</span>
-                    <strong className="text-rose-400 font-mono">{analysisResult.setup.invalidationPrice}</strong>
-                  </div>
-                  <div className="p-1.5 rounded bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400 block">Target (TP)</span>
-                    <strong className="text-emerald-400 font-mono">{analysisResult.setup.targetPrice}</strong>
-                  </div>
-                </div>
-
-                {/* Evidence Checklist */}
-                <div className="space-y-1.5 text-[11px]">
-                  <span className="text-slate-400 font-semibold block">Setup Evidence Breakdown:</span>
-                  {analysisResult.setup.evidenceChecklist.map((ev, i) => (
-                    <div key={i} className="flex items-center justify-between p-1.5 rounded bg-black/30 border border-slate-800 text-[10px]">
-                      <span className="flex items-center gap-1 text-slate-300">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                        {ev.label}
+              <>
+                {/* 1. Selected Visual Annotation Detail Box */}
+                {selectedAnnotation && (
+                  <div className="p-3.5 rounded-xl bg-[#0e1628] border border-blue-500/40 space-y-2 shadow-lg">
+                    <div className="flex items-center justify-between">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                        {selectedAnnotation.category}
                       </span>
-                      <span className="text-slate-400 font-mono">{ev.note}</span>
+                      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                        Confidence: {selectedAnnotation.confidence}
+                      </span>
                     </div>
-                  ))}
-                </div>
 
-                <p className="text-[10px] text-slate-500 italic pt-1">
-                  {analysisResult.setup.disclaimer}
-                </p>
-              </div>
-            )}
+                    <strong className="text-white text-sm block">{selectedAnnotation.label}</strong>
+                    <p className="text-xs text-slate-300 leading-relaxed">{selectedAnnotation.whyDetected}</p>
 
-            {/* Conflict Detection Summary */}
-            {analysisResult && analysisResult.conflicts.length > 0 && (
-              <div className="p-3.5 rounded-xl bg-amber-950/20 border border-amber-800/40 text-amber-200 space-y-2 text-[11px]">
-                <div className="flex items-center gap-1.5 font-bold text-amber-300">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Visual vs Tick Fact Conflict:</span>
+                    <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
+                      <span>Status: <strong className="text-slate-200">{selectedAnnotation.status}</strong></span>
+                      {selectedAnnotation.relatedStructure && (
+                        <span className="text-blue-300 font-mono">{selectedAnnotation.relatedStructure}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. Potential Setup Scenario (Derived Strictly from Image) */}
+                {analysisResult.setup ? (
+                  <div className="p-4 rounded-xl bg-gradient-to-b from-[#0f172a] to-[#0b101d] border border-indigo-500/40 space-y-3 shadow-md">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                        Screenshot Setup Scenario
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        {analysisResult.setup.riskRewardRatio}R Potential
+                      </span>
+                    </div>
+
+                    <h4 className="text-white font-bold text-sm">{analysisResult.setup.title}</h4>
+                    <p className="text-xs text-slate-300 leading-relaxed">{analysisResult.setup.narrative}</p>
+
+                    {/* Entry / Stop / Target Levels */}
+                    <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+                      <div className="p-2 rounded bg-black/40 border border-slate-800">
+                        <span className="text-slate-400 text-[10px] block">Entry Zone</span>
+                        <strong className="text-blue-300 font-mono text-[11px]">{analysisResult.setup.entryZone.topPrice}% - {analysisResult.setup.entryZone.bottomPrice}%</strong>
+                      </div>
+                      <div className="p-2 rounded bg-black/40 border border-slate-800">
+                        <span className="text-slate-400 text-[10px] block">Invalidation</span>
+                        <strong className="text-rose-400 font-mono text-[11px]">Y: {analysisResult.setup.invalidationPrice}%</strong>
+                      </div>
+                      <div className="p-2 rounded bg-black/40 border border-slate-800">
+                        <span className="text-slate-400 text-[10px] block">Target</span>
+                        <strong className="text-emerald-400 font-mono text-[11px]">Y: {analysisResult.setup.targetPrice}%</strong>
+                      </div>
+                    </div>
+
+                    {/* Evidence Checklist */}
+                    <div className="pt-2 border-t border-slate-800/80 space-y-1 text-xs">
+                      <strong className="text-slate-300 text-[11px] block">Visual Confluence Evidence:</strong>
+                      {analysisResult.setup.evidenceChecklist.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-1.5 text-slate-300 text-[11px]">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span>{item.label}: <strong className="text-white">{item.note}</strong></span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-[#0e1628] border border-amber-500/30 text-xs text-amber-300 space-y-1">
+                    <strong className="block text-white flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      No High-Probability Setup Forced
+                    </strong>
+                    <p className="text-slate-400 text-[11px]">
+                      The uploaded screenshot does not exhibit sufficient directional displacement or clean confluence. Chart Vision does not force fake setups.
+                    </p>
+                  </div>
+                )}
+
+                {/* 3. Detected Structures Summary List */}
+                <div className="space-y-2 text-xs">
+                  <strong className="text-slate-300 block font-bold">Detected Visual SMC Structures ({analysisResult.annotations.length}):</strong>
+                  <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-1">
+                    {analysisResult.annotations.map((ann) => (
+                      <button
+                        key={ann.id}
+                        onClick={() => setSelectedAnnotation(ann)}
+                        className={`w-full text-left p-2 rounded-lg border text-[11px] flex items-center justify-between transition-all ${
+                          selectedAnnotation?.id === ann.id
+                            ? 'bg-blue-600/20 border-blue-500 text-white shadow-sm'
+                            : 'bg-[#0e1628] border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <span className="font-semibold">{ann.label}</span>
+                        <span className="text-[10px] text-slate-500">{ann.category}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                {analysisResult.conflicts.map((conf, i) => (
-                  <p key={i} className="text-slate-300 leading-tight text-[10px]">
-                    {conf.explanation}
-                  </p>
-                ))}
-              </div>
+              </>
             )}
           </div>
         </div>

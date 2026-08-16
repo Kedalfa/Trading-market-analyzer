@@ -11,6 +11,9 @@ import newsRoutes from './routes/newsRoutes';
 import analysisRoutes from './routes/analysisRoutes';
 import tradeIdeaRoutes from './routes/tradeIdeaRoutes';
 import settingsRoutes from './routes/settingsRoutes';
+import telegramRoutes from './routes/telegramRoutes';
+
+import chartVisionRoutes from './routes/chartVisionRoutes';
 
 const app = express();
 
@@ -54,6 +57,8 @@ app.use('/api/news', newsRoutes);
 app.use('/api/analyses', analysisRoutes);
 app.use('/api/trade-ideas', tradeIdeaRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/telegram', telegramRoutes);
+app.use('/api/chart-vision', chartVisionRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────────
 app.use((_req: Request, res: Response) => {
@@ -66,12 +71,21 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
+import { startOutcomeMonitor, stopOutcomeMonitor } from './services/analysisOutcomeMonitor';
+import { telegramBot } from './services/telegramBotService';
+import { startMarketScanner, stopMarketScanner } from './services/marketScannerWorker';
+
 // ── Bootstrap & Server Lifecycle ──────────────────────────────────
 let httpServer: ReturnType<typeof createServer> | null = null;
 
 async function bootstrap() {
   await connectDB();
   await seedInstruments();
+
+  // Background Workers
+  startOutcomeMonitor(20000); // Check open analyses outcomes every 20s
+  startMarketScanner(45000);  // Scan watchlist pairs for Grade A setups every 45s
+  telegramBot.startPolling(); // Start official Telegram Bot command polling
 
   httpServer = createServer(app);
 
@@ -93,6 +107,9 @@ async function bootstrap() {
 }
 
 function shutdown() {
+  stopOutcomeMonitor();
+  stopMarketScanner();
+  telegramBot.stopPolling();
   if (httpServer) {
     httpServer.close(() => {
       console.log('[Server] Gracefully stopped');
