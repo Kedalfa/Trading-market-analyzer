@@ -142,56 +142,86 @@ export function generateStructuredSMCAnalysis(
     summary: `Setup Quality Grade: ${grade} (${totalWeightedScore}/100). ${scoreComponents.filter(c => !c.isPositive).map(c => c.reason).join('. ')}`
   };
 
-  // 6. Bullish & Bearish Probabilistic Scenarios
+  // 6. Bullish & Bearish Probabilistic Scenarios with Strict Directional Geometry
   const bullOB = activeOrderBlocks.find(ob => ob.type === 'BULLISH');
   const bearOB = activeOrderBlocks.find(ob => ob.type === 'BEARISH');
-  const targetBuysidePrice = nearestBuyside?.price || lastPrice * 1.015;
-  const targetSellsidePrice = nearestSellside?.price || lastPrice * 0.985;
+
+  const isForex = instrument.assetClass === 'forex';
+  const decimals = isForex ? 5 : 2;
+  const bufferPips = instrument.pipSize > 0 ? instrument.pipSize * 5 : lastPrice * 0.001;
+
+  // ── Bullish Scenario Geometry (SL < Entry < TP, RR >= 2.0R) ─────────
+  const rawBullEntryTop = unmitigatedBullFVG?.top || bullOB?.topPrice || lastPrice * 0.998;
+  const rawBullEntryBottom = unmitigatedBullFVG?.bottom || bullOB?.bottomPrice || (rawBullEntryTop - bufferPips);
+  const bullEntry = rawBullEntryTop;
+
+  const rawBullSL = unmitigatedBullFVG?.bottom || bullOB?.bottomPrice || dealingRange?.rangeLow || (bullEntry - bufferPips * 3);
+  const bullSL = Math.min(rawBullSL, bullEntry - bufferPips);
+  const bullRisk = Math.max(bufferPips, bullEntry - bullSL);
+
+  const minBullTarget = bullEntry + bullRisk * 2.0;
+  const rawBullTarget = nearestBuyside && nearestBuyside.price > bullEntry ? nearestBuyside.price : minBullTarget;
+  const targetBuysidePrice = Math.max(rawBullTarget, minBullTarget);
+  const bullTarget1 = (bullEntry + targetBuysidePrice) / 2;
 
   const bullishScenario: TradingScenario = {
     id: `scenario-bull-${pipeline.calculationTimestamp}`,
     type: 'BULLISH',
     probabilityGrade: structure.currentTrend === 'BULLISH' ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
     title: 'Bullish Continuation / Retracement Long Setup',
-    narrative: `Evidence favors a bullish expansion toward buy-side liquidity (${targetBuysidePrice.toFixed(4)}) if price respects the discount dealing range and unmitigated institutional demand.`,
+    narrative: `Evidence favors a bullish expansion toward buy-side liquidity (${targetBuysidePrice.toFixed(decimals)}) if price respects the discount dealing range and unmitigated institutional demand.`,
     conditionsRequired: [
-      `Price must hold above the key swing low at ${(dealingRange?.rangeLow || lastPrice * 0.99).toFixed(4)}`,
-      `Retracement into Bullish FVG [${(unmitigatedBullFVG?.bottom || lastPrice * 0.995).toFixed(4)} - ${(unmitigatedBullFVG?.top || lastPrice).toFixed(4)}]`,
+      `Price must hold above the key swing low at ${bullSL.toFixed(decimals)}`,
+      `Retracement into Bullish Demand Zone [${rawBullEntryBottom.toFixed(decimals)} - ${rawBullEntryTop.toFixed(decimals)}]`,
       'Lower timeframe rejection candle confirming demand absorption'
     ],
-    invalidationTrigger: `Decisive candle close below ${(dealingRange?.rangeLow || lastPrice * 0.99).toFixed(4)} invalidates the bullish thesis and suggests structural shift to bearish.`,
-    invalidationPrice: dealingRange?.rangeLow || lastPrice * 0.99,
+    invalidationTrigger: `Decisive candle close below ${bullSL.toFixed(decimals)} invalidates the bullish thesis and suggests structural shift to bearish.`,
+    invalidationPrice: Number(bullSL.toFixed(decimals)),
     potentialTargets: [
-      { label: 'Target 1 (Internal Liquidity)', price: (lastPrice + targetBuysidePrice) / 2, description: '50% Dealing range equilibrium / intermediate swing high' },
-      { label: 'Target 2 (Major Buy-Side Liquidity)', price: targetBuysidePrice, description: 'Major Equal Highs / Previous Day High liquidity pool' }
+      { label: 'Target 1 (Internal Liquidity)', price: Number(bullTarget1.toFixed(decimals)), description: '50% Dealing range equilibrium / intermediate swing high' },
+      { label: 'Target 2 (Major Buy-Side Liquidity)', price: Number(targetBuysidePrice.toFixed(decimals)), description: 'Major Equal Highs / Previous Day High liquidity pool' }
     ],
     idealEntryZone: {
-      topPrice: unmitigatedBullFVG?.top || bullOB?.topPrice || lastPrice * 0.998,
-      bottomPrice: unmitigatedBullFVG?.bottom || bullOB?.bottomPrice || lastPrice * 0.993,
+      topPrice: Number(rawBullEntryTop.toFixed(decimals)),
+      bottomPrice: Number(rawBullEntryBottom.toFixed(decimals)),
       referenceZone: 'Unmitigated Bullish FVG + Order Block Discount Zone'
     }
   };
+
+  // ── Bearish Scenario Geometry (TP < Entry < SL, RR >= 2.0R) ────────
+  const rawBearEntryTop = unmitigatedBearFVG?.top || bearOB?.topPrice || (lastPrice * 1.002 + bufferPips);
+  const rawBearEntryBottom = unmitigatedBearFVG?.bottom || bearOB?.bottomPrice || lastPrice * 1.002;
+  const bearEntry = rawBearEntryBottom;
+
+  const rawBearSL = unmitigatedBearFVG?.top || bearOB?.topPrice || dealingRange?.rangeHigh || (bearEntry + bufferPips * 3);
+  const bearSL = Math.max(rawBearSL, bearEntry + bufferPips);
+  const bearRisk = Math.max(bufferPips, bearSL - bearEntry);
+
+  const minBearTarget = bearEntry - bearRisk * 2.0;
+  const rawBearTarget = nearestSellside && nearestSellside.price < bearEntry ? nearestSellside.price : minBearTarget;
+  const targetSellsidePrice = Math.min(rawBearTarget, minBearTarget);
+  const bearTarget1 = (bearEntry + targetSellsidePrice) / 2;
 
   const bearishScenario: TradingScenario = {
     id: `scenario-bear-${pipeline.calculationTimestamp}`,
     type: 'BEARISH',
     probabilityGrade: structure.currentTrend === 'BEARISH' ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
     title: 'Bearish Continuation / Liquidity Sweep Short Setup',
-    narrative: `Evidence favors a bearish decline toward sell-side liquidity (${targetSellsidePrice.toFixed(4)}) if price rejects the premium dealing range or confirms a liquidity grab above highs.`,
+    narrative: `Evidence favors a bearish decline toward sell-side liquidity (${targetSellsidePrice.toFixed(decimals)}) if price rejects the premium dealing range or confirms a liquidity grab above highs.`,
     conditionsRequired: [
-      `Price must remain capped below the recent swing high at ${(dealingRange?.rangeHigh || lastPrice * 1.01).toFixed(4)}`,
-      `Rejection from Bearish FVG / Order Block [${(unmitigatedBearFVG?.bottom || lastPrice).toFixed(4)} - ${(unmitigatedBearFVG?.top || lastPrice * 1.005).toFixed(4)}]`,
+      `Price must remain capped below the key swing high at ${bearSL.toFixed(decimals)}`,
+      `Rejection from Bearish Supply Zone [${rawBearEntryBottom.toFixed(decimals)} - ${rawBearEntryTop.toFixed(decimals)}]`,
       'Bearish Market Structure Shift (MSS) on execution timeframe'
     ],
-    invalidationTrigger: `Decisive candle close above ${(dealingRange?.rangeHigh || lastPrice * 1.01).toFixed(4)} violates bearish order flow and voids the short scenario.`,
-    invalidationPrice: dealingRange?.rangeHigh || lastPrice * 1.01,
+    invalidationTrigger: `Decisive candle close above ${bearSL.toFixed(decimals)} violates bearish order flow and voids the short scenario.`,
+    invalidationPrice: Number(bearSL.toFixed(decimals)),
     potentialTargets: [
-      { label: 'Target 1 (Internal SSL)', price: (lastPrice + targetSellsidePrice) / 2, description: 'Intermediate swing low sell-side liquidity' },
-      { label: 'Target 2 (Major Sell-Side Liquidity)', price: targetSellsidePrice, description: 'Major Equal Lows / Previous Day Low pool' }
+      { label: 'Target 1 (Internal SSL)', price: Number(bearTarget1.toFixed(decimals)), description: 'Intermediate swing low sell-side liquidity' },
+      { label: 'Target 2 (Major Sell-Side Liquidity)', price: Number(targetSellsidePrice.toFixed(decimals)), description: 'Major Equal Lows / Previous Day Low pool' }
     ],
     idealEntryZone: {
-      topPrice: unmitigatedBearFVG?.top || bearOB?.topPrice || lastPrice * 1.005,
-      bottomPrice: unmitigatedBearFVG?.bottom || bearOB?.bottomPrice || lastPrice * 1.001,
+      topPrice: Number(rawBearEntryTop.toFixed(decimals)),
+      bottomPrice: Number(rawBearEntryBottom.toFixed(decimals)),
       referenceZone: 'Unmitigated Bearish FVG + Premium Supply Zone'
     }
   };

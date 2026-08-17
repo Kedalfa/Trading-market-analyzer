@@ -1,6 +1,6 @@
-import { Candle } from '@/types/market';
-import { OrderBlock, DisplacementMove } from '@/types/smc';
-import { StructureBreak } from '@/types/structure';
+import { Candle } from '../../types/market';
+import { OrderBlock, DisplacementMove } from '../../types/smc';
+import { StructureBreak } from '../../types/structure';
 
 export function detectOrderBlocks(
   candles: Candle[],

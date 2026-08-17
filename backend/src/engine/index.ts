@@ -1,7 +1,7 @@
-import { Candle, Instrument, MultiTimeframeSelection } from '@/types/market';
-import { MarketStructureResult } from '@/types/structure';
-import { LiquidityPool, FairValueGap, OrderBlock, DealingRange, DisplacementMove } from '@/types/smc';
-import { SessionStatus } from '@/types/session';
+import { Candle, Instrument, MultiTimeframeSelection } from '../types/market';
+import { MarketStructureResult } from '../types/structure';
+import { LiquidityPool, FairValueGap, OrderBlock, DealingRange, DisplacementMove } from '../types/smc';
+import { SessionStatus } from '../types/session';
 
 import { analyzeMarketStructure } from './structure/marketStructureEngine';
 import { detectLiquidityPools } from './liquidity/liquidityEngine';

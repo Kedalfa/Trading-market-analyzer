@@ -8,8 +8,7 @@
 import { Analysis, IAnalysis } from '../models/Analysis';
 import { TelegramAlertLog } from '../models/TelegramAlertLog';
 import { getInstrumentMapping } from '../config/instrumentRegistry';
-import { fetchBinanceCandles, fetchBinanceBookQuote } from './binanceService';
-import { fetchYahooCandles, fetchYahooRealtimeQuote } from './yahooMarketService';
+import { getAuthoritativeCandles, getAuthoritativeQuote } from './marketDataService';
 import { telegramAlertDispatcher } from './telegramAlertDispatcher';
 
 export interface MonitorHealthStatus {
@@ -27,38 +26,29 @@ export const monitorHealth: MonitorHealthStatus = {
   activeAnalysesCount: 0,
 };
 
-export async function evaluateSingleAnalysis(analysis: IAnalysis): Promise<void> {
-  const mapping = getInstrumentMapping(analysis.instrumentId);
-  const provider = mapping?.provider || (analysis.instrumentId.includes('USDT') ? 'binance' : 'yahoo');
+export function getProximityThreshold(instrumentId: string, entryPrice: number): number {
+  const inst = instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
+  if (inst.includes('JPY')) return 0.05; // 5 pips on JPY (e.g. 155.20 vs 155.25)
+  if (inst === 'EURUSD' || inst === 'GBPUSD') return 0.0005; // 5 pips on Forex
+  if (inst === 'XAUUSD') return 2.0; // $2.00 on Gold
+  if (inst.includes('USDT') || inst.includes('BTC')) return entryPrice * 0.0025; // 0.25% on Crypto
+  if (inst === 'US500') return 8.0; // 8 pts on S&P 500
+  if (inst === 'NAS100') return 30.0; // 30 pts on Nasdaq 100
+  return entryPrice * 0.002;
+}
 
+export async function evaluateSingleAnalysis(analysis: IAnalysis): Promise<void> {
   let latestCandles: any[] | null = null;
   let currentPrice: number | null = null;
 
   try {
-    if (provider === 'binance') {
-      const [candles, quote] = await Promise.all([
-        fetchBinanceCandles(analysis.instrumentId, analysis.timeframe, 50),
-        fetchBinanceBookQuote(analysis.instrumentId),
-      ]);
-      latestCandles = candles;
-      currentPrice = quote?.price || (candles && candles.length > 0 ? candles[candles.length - 1].close : null);
-    } else {
-      const yahooSymbol = mapping?.providerSymbol || (
-        analysis.instrumentId === 'EURUSD' ? 'EURUSD=X' :
-        analysis.instrumentId === 'GBPUSD' ? 'GBPUSD=X' :
-        analysis.instrumentId === 'USDJPY' ? 'JPY=X' :
-        analysis.instrumentId === 'XAUUSD' ? 'GC=F' :
-        analysis.instrumentId === 'US500' ? '^GSPC' : '^IXIC'
-      );
-      const [result, liveQuote] = await Promise.all([
-        fetchYahooCandles(yahooSymbol, analysis.timeframe, 50),
-        fetchYahooRealtimeQuote(yahooSymbol),
-      ]);
-      if (result) {
-        latestCandles = result.candles;
-      }
-      currentPrice = liveQuote?.price || result?.quote.price || null;
-    }
+    const [data, quote] = await Promise.all([
+      getAuthoritativeCandles(analysis.instrumentId, analysis.timeframe, 50),
+      getAuthoritativeQuote(analysis.instrumentId),
+    ]);
+
+    latestCandles = data?.candles || null;
+    currentPrice = quote?.price || (latestCandles && latestCandles.length > 0 ? latestCandles[latestCandles.length - 1].close : null);
   } catch (err) {
     console.warn(`[OutcomeMonitor] Feed fetch failed for ${analysis.symbol}:`, err);
   }
@@ -340,6 +330,7 @@ export async function evaluateAnalysisOutcome(
       entryReachedAt = now;
       analysis.outcome.entryReachedAt = now;
       analysis.outcome.status = 'ENTRY_REACHED';
+      analysis.outcome.isApproachingEntry = false;
       analysis.outcome.monitoringStatus = `Trade Active (Entry Reached at ${entry})`;
       if (!analysis.outcome.auditTrail.some(a => a.newStatus === 'ENTRY_REACHED')) {
         analysis.outcome.auditTrail.push({
@@ -351,23 +342,66 @@ export async function evaluateAnalysisOutcome(
           observedPrice: currentPrice,
         });
       }
+      if (!analysis.outcome.entryTriggeredNotified) {
+        analysis.outcome.entryTriggeredNotified = true;
+        await telegramAlertDispatcher.dispatchLifecycleAlert(
+          analysis.analysisId,
+          analysis.symbol,
+          'ENTRY_TRIGGERED',
+          'ENTRY REACHED',
+          '',
+          currentPrice,
+          analysis
+        );
+      }
       await analysis.save();
-      await telegramAlertDispatcher.dispatchLifecycleAlert(
-        analysis.analysisId,
-        analysis.symbol,
-        'ENTRY_TRIGGERED',
-        'ENTRY REACHED',
-        '',
-        currentPrice,
-        analysis
-      );
       return;
+    }
+
+    // Check Entry Proximity / Approaching Entry State
+    const proximityThreshold = getProximityThreshold(analysis.instrumentId || analysis.symbol, entry);
+    const distanceToEntry = Math.abs(currentPrice - entry);
+    const isApproaching = distanceToEntry <= proximityThreshold;
+
+    if (isApproaching) {
+      analysis.outcome.isApproachingEntry = true;
+      const mapping = getInstrumentMapping(analysis.instrumentId);
+      const pipMultiplier = mapping?.pipSize ? (1 / mapping.pipSize) : 10000;
+      const distanceFormatted = (distanceToEntry * pipMultiplier).toFixed(1);
+      analysis.outcome.monitoringStatus = `Approaching Entry (${distanceFormatted} ${mapping?.assetClass === 'forex' ? 'pips' : 'pts'} away)`;
+
+      // Dispatch single, deduplicated ENTRY_APPROACHING Telegram notification
+      if (!analysis.outcome.entryApproachingNotified) {
+        analysis.outcome.entryApproachingNotified = true;
+        analysis.outcome.auditTrail.push({
+          previousStatus: currentStatus,
+          newStatus: 'APPROACHING_ENTRY',
+          timestamp: now,
+          triggerPrice: currentPrice,
+          triggerReason: `Price is ${distanceFormatted} ${mapping?.assetClass === 'forex' ? 'pips' : 'pts'} from designated entry (${entry})`,
+          observedPrice: currentPrice,
+        });
+
+        await telegramAlertDispatcher.dispatchLifecycleAlert(
+          analysis.analysisId,
+          analysis.symbol,
+          'ENTRY_APPROACHING',
+          'ENTRY APPROACHING',
+          '',
+          currentPrice,
+          analysis
+        );
+      }
+    } else {
+      analysis.outcome.isApproachingEntry = false;
+      analysis.outcome.monitoringStatus = `Waiting for Entry (Live Price: ${currentPrice})`;
     }
   }
 
   // If entry reached and trade is still active
   if (entryReached) {
     analysis.outcome.status = 'ENTRY_REACHED';
+    analysis.outcome.isApproachingEntry = false;
     analysis.outcome.monitoringStatus = `Trade Active (Live Price: ${currentPrice})`;
     analysis.outcome.observedPrice = currentPrice;
     analysis.outcome.lastMonitoredAt = now;
@@ -377,7 +411,6 @@ export async function evaluateAnalysisOutcome(
 
   // Otherwise still waiting for entry
   analysis.outcome.status = 'WAITING_FOR_ENTRY';
-  analysis.outcome.monitoringStatus = `Waiting for Entry (Live Price: ${currentPrice})`;
   analysis.outcome.observedPrice = currentPrice;
   analysis.outcome.lastMonitoredAt = now;
   await analysis.save();

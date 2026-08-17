@@ -2,6 +2,18 @@ import { Instrument } from '@/types/market';
 
 export const SUPPORTED_INSTRUMENTS: Instrument[] = [
   {
+    id: 'BTCUSDT',
+    symbol: 'BTC/USDT',
+    name: 'Bitcoin / Tether',
+    assetClass: 'crypto',
+    baseCurrency: 'BTC',
+    quoteCurrency: 'USDT',
+    pipSize: 1.0,
+    tickSize: 0.01,
+    defaultTimeframe: '15M',
+    provider: 'binance'
+  },
+  {
     id: 'EURUSD',
     symbol: 'EUR/USD',
     name: 'Euro / US Dollar',
@@ -36,42 +48,6 @@ export const SUPPORTED_INSTRUMENTS: Instrument[] = [
     tickSize: 0.001,
     defaultTimeframe: '15M',
     provider: 'yahoo'
-  },
-  {
-    id: 'BTCUSDT',
-    symbol: 'BTC/USDT',
-    name: 'Bitcoin / Tether',
-    assetClass: 'crypto',
-    baseCurrency: 'BTC',
-    quoteCurrency: 'USDT',
-    pipSize: 1.0,
-    tickSize: 0.01,
-    defaultTimeframe: '15M',
-    provider: 'binance'
-  },
-  {
-    id: 'ETHUSDT',
-    symbol: 'ETH/USDT',
-    name: 'Ethereum / Tether',
-    assetClass: 'crypto',
-    baseCurrency: 'ETH',
-    quoteCurrency: 'USDT',
-    pipSize: 0.1,
-    tickSize: 0.01,
-    defaultTimeframe: '15M',
-    provider: 'binance'
-  },
-  {
-    id: 'SOLUSDT',
-    symbol: 'SOL/USDT',
-    name: 'Solana / Tether',
-    assetClass: 'crypto',
-    baseCurrency: 'SOL',
-    quoteCurrency: 'USDT',
-    pipSize: 0.01,
-    tickSize: 0.001,
-    defaultTimeframe: '15M',
-    provider: 'binance'
   },
   {
     id: 'XAUUSD',

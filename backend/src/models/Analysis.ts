@@ -24,7 +24,12 @@ const auditEntrySchema = new Schema<IAuditEntry>(
 );
 
 export interface IAnalysisOutcome {
-  status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+  status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'APPROACHING_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+  isApproachingEntry?: boolean;
+  entryApproachingNotified?: boolean;
+  entryTriggeredNotified?: boolean;
+  invalidatedReason?: string;
+  supersededBySetupId?: string;
   entryReachedAt?: Date;
   completedAt?: Date;
   targetHitAt?: Date;
@@ -109,10 +114,15 @@ const analysisSchema = new Schema<IAnalysis>(
     outcome: {
       status: {
         type: String,
-        enum: ['OPEN', 'WAITING_FOR_ENTRY', 'ENTRY_REACHED', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS', 'MONITORING_PAUSED'],
+        enum: ['OPEN', 'WAITING_FOR_ENTRY', 'APPROACHING_ENTRY', 'ENTRY_REACHED', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS', 'MONITORING_PAUSED'],
         default: 'OPEN',
         index: true,
       },
+      isApproachingEntry: { type: Boolean, default: false },
+      entryApproachingNotified: { type: Boolean, default: false },
+      entryTriggeredNotified: { type: Boolean, default: false },
+      invalidatedReason: String,
+      supersededBySetupId: String,
       entryReachedAt: Date,
       completedAt: { type: Date, index: true },
       targetHitAt: Date,

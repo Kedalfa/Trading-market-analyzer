@@ -16,7 +16,7 @@ export function detectLiquidityPools(
   const { tolerancePercent = 0.08, maxLookbackBars = 200 } = options;
   const pools: LiquidityPool[] = [];
 
-  if (candles.length < 10) return pools;
+  if (candles.length < 5) return pools;
 
   const relevantCandles = candles.slice(-maxLookbackBars);
   const currentPrice = candles[candles.length - 1].close;

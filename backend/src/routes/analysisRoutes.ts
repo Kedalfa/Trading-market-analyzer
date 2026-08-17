@@ -173,31 +173,32 @@ router.get('/:analysisId/details', async (req: Request, res: Response) => {
   }
 });
 
+import { validateTradeSetup } from '../services/tradeSetupValidator';
+
 /**
- * POST /api/analyses — save a new analysis snapshot (validates R:R >= 1.9R)
+ * POST /api/analyses — save a new analysis snapshot (enforces complete trading integrity validation)
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
     const body = req.body;
 
-    const isBull = body.direction === 'BULLISH';
-    const entry = Number(body.entryPrice);
-    const stop = Number(body.stopLossPrice);
-    const target = Number(body.targetPrice);
+    const validation = validateTradeSetup({
+      analysisId: body.analysisId,
+      symbol: body.symbol,
+      instrumentId: body.instrumentId || body.symbol,
+      direction: body.direction,
+      currentPrice: body.currentPrice,
+      entryPrice: body.entryPrice,
+      stopLossPrice: body.stopLossPrice,
+      targetPrice: body.targetPrice,
+      invalidationPrice: body.invalidationPrice,
+      rulesetUsed: body.rulesetUsed,
+    });
 
-    const rawRisk = isBull ? (entry - stop) : (stop - entry);
-    const rawReward = isBull ? (target - entry) : (entry - target);
-
-    // Normalize floating point representation to 8 decimals precision to eliminate IEEE 754 subtraction artifacts
-    const preciseRisk = Math.round(rawRisk * 1e8);
-    const preciseReward = Math.round(rawReward * 1e8);
-    const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
-
-    // Strict R:R Gate: Only accept setups with calculated unrounded R:R >= 1.9R
-    if (actualRR < 1.9) {
+    if (!validation.isValid) {
       return res.status(400).json({
         success: false,
-        error: `Setup rejected: Calculated Risk-to-Reward ratio (${actualRR.toFixed(4)}R) is below the required minimum of 1.9R.`,
+        error: validation.rejectionReason,
       });
     }
 
@@ -217,7 +218,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     const doc = {
       ...body,
-      riskRewardRatio: Number(actualRR.toFixed(2)),
+      riskRewardRatio: Number(validation.actualRR.toFixed(2)),
       outcome: initialOutcome,
     };
 

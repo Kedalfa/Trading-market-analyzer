@@ -1,6 +1,6 @@
-import { Candle } from '@/types/market';
-import { SwingPoint } from '@/types/structure';
-import { DealingRange } from '@/types/smc';
+import { Candle } from '../../types/market';
+import { SwingPoint } from '../../types/structure';
+import { DealingRange } from '../../types/smc';
 
 export function calculateDealingRange(
   candles: Candle[],

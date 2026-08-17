@@ -27,9 +27,11 @@ import { EducationalModal } from '@/components/education/EducationalModal';
 import { VisionComparisonModal } from '@/components/vision/VisionComparisonModal';
 import { RiskCalculatorModal } from '@/components/risk/RiskCalculatorModal';
 import { TelegramConnectModal } from '@/components/telegram/TelegramConnectModal';
+import { MarketDataHealthModal } from '@/components/health/MarketDataHealthModal';
 import { ReplayController } from '@/components/replay/ReplayController';
 import { HistoryView } from '@/components/history/HistoryView';
 import { EDUCATIONAL_CONCEPTS } from '@/services/educationalService';
+import { validateTradeSetup } from '@/services/tradeSetupValidator';
 
 import {
   RefreshCw, AlertTriangle, BookOpen, WifiOff,
@@ -64,7 +66,7 @@ export default function SMCMarketAnalyzerApp() {
 
   // ── Real-Time Market Data & Quotes ───────────────────────────────
   const [currentQuote, setCurrentQuote] = useState<RealQuote | null>(null);
-  const [dataStatus, setDataStatus] = useState<'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE'>('LIVE');
+  const [dataStatus, setDataStatus] = useState<'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE' | 'STALE'>('LIVE');
   const [providerName, setProviderName] = useState<string>('Authoritative Market Feed');
   const [lastDataUpdate, setLastDataUpdate] = useState<number>(Date.now());
   const [isRealTime, setIsRealTime] = useState<boolean>(true);
@@ -83,11 +85,13 @@ export default function SMCMarketAnalyzerApp() {
   const [isVisionOpen, setIsVisionOpen] = useState<boolean>(false);
   const [isRiskOpen, setIsRiskOpen] = useState<boolean>(false);
   const [isTelegramOpen, setIsTelegramOpen] = useState<boolean>(false);
+  const [isHealthOpen, setIsHealthOpen] = useState<boolean>(false);
   const [riskInitialDirection, setRiskInitialDirection] = useState<'LONG' | 'SHORT'>('LONG');
 
   // ── Replay mode ──────────────────────────────────────────────────
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [replayIndex, setReplayIndex] = useState<number>(0);
+  const autoSavedSetupsRef = useRef<Set<string>>(new Set());
 
   // ── 1. Bootstrap: load instruments + settings from backend ───────
   useEffect(() => {
@@ -186,6 +190,71 @@ export default function SMCMarketAnalyzerApp() {
         setHtfPipelineResult(htfPipe);
         setAnalysis(structAnalysis);
         setReplayIndex(pipe.candles.length - 1);
+
+        // Auto-persist qualified setups to Analysis History (prevent duplicates with autoSavedSetupsRef)
+        const isBull = structAnalysis.marketOverview.htfBias === 'BULLISH';
+        const scenario = isBull ? structAnalysis.scenarios.bullish : structAnalysis.scenarios.bearish;
+
+        if (structAnalysis.setupQuality.totalScore >= 75 && scenario.probabilityGrade === 'HIGH_PROBABILITY') {
+          const entry = isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice;
+          const stop = scenario.invalidationPrice;
+          const target = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price;
+
+          const validation = validateTradeSetup({
+            analysisId: structAnalysis.analysisId,
+            symbol: structAnalysis.symbol,
+            instrumentId: selectedInstrument.id,
+            direction: isBull ? 'BULLISH' : 'BEARISH',
+            currentPrice: pipe.lastPrice,
+            entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+            stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+            targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+            invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+            rulesetUsed: selectedRuleset,
+          });
+
+          if (validation.isValid && !autoSavedSetupsRef.current.has(structAnalysis.analysisId)) {
+            autoSavedSetupsRef.current.add(structAnalysis.analysisId);
+            saveAnalysis({
+              analysisId: structAnalysis.analysisId,
+              symbol: structAnalysis.symbol,
+              instrumentId: selectedInstrument.id,
+              timeframe: structAnalysis.timeframeHierarchy.intermediate,
+              htfTimeframe: structAnalysis.timeframeHierarchy.higher,
+              currentPrice: pipe.lastPrice,
+              direction: isBull ? 'BULLISH' : 'BEARISH',
+              entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+              stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+              targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+              invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+              riskRewardRatio: Number(validation.actualRR.toFixed(2)),
+              rulesetUsed: selectedRuleset,
+              htfBias: structAnalysis.marketOverview.htfBias,
+              intermediateStructure: structAnalysis.marketOverview.intermediateStructure,
+              structuralEvidence: structAnalysis.structuralEvidence.bulletPoints,
+              conflictingSignals: structAnalysis.structuralEvidence.conflictingSignals,
+              bullishScenario: structAnalysis.scenarios.bullish,
+              bearishScenario: structAnalysis.scenarios.bearish,
+              setupQuality: structAnalysis.setupQuality,
+              newsRiskWarning: structAnalysis.newsContext.riskWarning,
+              sessionNotes: structAnalysis.sessionContext.sessionNotes ?? '',
+              savedAt: new Date().toISOString(),
+              outcome: {
+                status: 'OPEN',
+                monitoringStatus: 'Active Background Monitoring Initialized',
+                auditTrail: [
+                  {
+                    previousStatus: 'NEW',
+                    newStatus: 'OPEN',
+                    timestamp: new Date().toISOString(),
+                    triggerReason: 'Automatic qualification from live market scan',
+                    observedPrice: pipe.lastPrice,
+                  },
+                ],
+              },
+            }).catch(e => console.warn('[AutoSave] Skipped duplicate/error:', e));
+          }
+        }
       } catch (err: any) {
         console.error('[Pipeline] Failed:', err);
         if (isMounted) {
@@ -209,15 +278,16 @@ export default function SMCMarketAnalyzerApp() {
 
     let isMounted = true;
     const intervalMs = selectedInstrument.provider === 'binance' ? 2000 : 2500;
+    const targetInstId = selectedInstrument.id;
 
     const pollQuote = async () => {
       try {
-        const quote = await fetchRealtimeQuote(selectedInstrument.id);
-        if (isMounted && quote && quote.price) {
+        const quote = await fetchRealtimeQuote(targetInstId);
+        if (isMounted && selectedInstrument?.id === targetInstId && quote && quote.price) {
           setCurrentQuote(quote);
           setLastDataUpdate(quote.timestamp || Date.now());
           setDataStatus(quote.status || 'LIVE');
-          setIsRealTime(quote.status !== 'MARKET_CLOSED');
+          setIsRealTime(quote.status === 'LIVE');
 
           // Incrementally update the latest candle in place without whole-chart reload
           setPipelineResult(prev => {
@@ -269,18 +339,26 @@ export default function SMCMarketAnalyzerApp() {
       const entry = isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice;
       const stop = scenario.invalidationPrice;
       const target = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price || (isBull ? entry * 1.02 : entry * 0.98);
-      const rawRisk = isBull ? (entry - stop) : (stop - entry);
-      const rawReward = isBull ? (target - entry) : (entry - target);
-      const preciseRisk = Math.round(rawRisk * 1e8);
-      const preciseReward = Math.round(rawReward * 1e8);
-      const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
 
-      if (actualRR < 1.9) {
-        console.warn(`[Page] Setup rejected: Calculated R:R (${actualRR.toFixed(4)}R) is below the minimum required 1.9R`);
+      const validation = validateTradeSetup({
+        analysisId: analysis.analysisId,
+        symbol: analysis.symbol,
+        instrumentId: selectedInstrument.id,
+        direction: isBull ? 'BULLISH' : 'BEARISH',
+        currentPrice: currentQuote?.price ?? analysis.currentPrice,
+        entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+        rulesetUsed: selectedRuleset,
+      });
+
+      if (!validation.isValid) {
+        console.warn(`[Page] Setup rejected by trade validator: ${validation.rejectionReason}`);
         return;
       }
 
-      const rr = Number(actualRR.toFixed(2));
+      const rr = Number(validation.actualRR.toFixed(2));
 
       await saveAnalysis({
         analysisId: analysis.analysisId,
@@ -431,6 +509,7 @@ export default function SMCMarketAnalyzerApp() {
                     isRealTime={isRealTime}
                     errorMessage={marketErrorMessage}
                     onSelectConcept={handleOpenConcept}
+                    onOpenHealthModal={() => setIsHealthOpen(true)}
                     replayIndex={isReplayMode ? replayIndex : undefined}
                   />
                 </div>
@@ -517,6 +596,11 @@ export default function SMCMarketAnalyzerApp() {
       <TelegramConnectModal
         isOpen={isTelegramOpen}
         onClose={() => setIsTelegramOpen(false)}
+      />
+
+      <MarketDataHealthModal
+        isOpen={isHealthOpen}
+        onClose={() => setIsHealthOpen(false)}
       />
 
       {analysis && selectedInstrument && (

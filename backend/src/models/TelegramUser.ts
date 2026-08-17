@@ -38,6 +38,12 @@ export interface ITelegramUser extends Document {
   lastActiveAt?: Date;
   watchlist: string[];
   settings: ITelegramUserSettings;
+  isAuthorized: boolean;
+  authorizedAt?: Date;
+  verificationCodeHash?: string;
+  verificationExpiresAt?: Date;
+  verificationAttempts: number;
+  lastCodeRequestedAt?: Date;
 }
 
 const telegramUserSchema = new Schema<ITelegramUser>(
@@ -51,6 +57,12 @@ const telegramUserSchema = new Schema<ITelegramUser>(
     isConnected: { type: Boolean, default: false, index: true },
     connectedAt: Date,
     lastActiveAt: Date,
+    isAuthorized: { type: Boolean, default: false, index: true },
+    authorizedAt: Date,
+    verificationCodeHash: String,
+    verificationExpiresAt: Date,
+    verificationAttempts: { type: Number, default: 0 },
+    lastCodeRequestedAt: Date,
     watchlist: {
       type: [String],
       default: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],

@@ -12,6 +12,7 @@ import { Analysis } from '../models/Analysis';
 import { telegramBot, escapeHtml, InlineKeyboardButton } from './telegramBotService';
 import { StructuredSMCAnalysis } from '../types/ai';
 import { FullSMCPipelineResult } from '../engine';
+import { getInstrumentMapping } from '../config/instrumentRegistry';
 
 export interface AlertDispatchParams {
   setupId: string;
@@ -41,6 +42,7 @@ class TelegramAlertDispatcher {
     const symClean = params.symbol.replace('/', '').toUpperCase();
     const users = await TelegramUser.find({
       isConnected: true,
+      isAuthorized: true,
       chatId: { $exists: true },
       'settings.isMuted': false,
       'settings.alertTypes.newSetup': true,
@@ -132,6 +134,7 @@ class TelegramAlertDispatcher {
     observedPrice?: number
   ): string {
     const symbol = analysisDoc?.symbol || 'Instrument';
+    const symClean = symbol.replace(/[\/\-_]/g, '').toUpperCase();
     const isBull = analysisDoc?.direction === 'BULLISH';
     const dirLabel = isBull ? 'Bullish' : 'Bearish';
     const setupId = analysisDoc?.analysisId || '';
@@ -190,14 +193,38 @@ class TelegramAlertDispatcher {
       );
     }
 
+    if (alertType === 'ENTRY_APPROACHING') {
+      const mapping = getInstrumentMapping(analysisDoc?.instrumentId || symClean);
+      const pipMultiplier = mapping?.pipSize ? (1 / mapping.pipSize) : 10000;
+      const distance = entry != null && observedPrice != null ? Math.abs(entry - observedPrice) : null;
+      const distancePips = distance != null
+        ? `${(distance * pipMultiplier).toFixed(1)} ${mapping?.assetClass === 'forex' ? 'pips' : 'pts'}`
+        : null;
+
+      return (
+        `⚠️ <b>ENTRY APPROACHING</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        (observedPrice != null ? `<b>Current:</b> <code>${observedPrice}</code>\n` : '') +
+        (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
+        (distancePips != null ? `<b>Distance:</b> ${distancePips}\n` : '') +
+        (stop != null ? `<b>SL:</b> <code>${stop}</code>\n` : '') +
+        (target != null ? `<b>TP:</b> <code>${target}</code>\n` : '') +
+        `<b>R:R:</b> ${rr}R\n\n` +
+        `Setup is approaching the entry zone.\n\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
     if (alertType === 'ENTRY_TRIGGERED') {
       return (
-        `🎯 <b>ENTRY TRIGGERED</b>\n\n` +
+        `🟢 <b>ENTRY REACHED — TRADE ACTIVE</b>\n\n` +
         `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
-        (entry != null ? `<b>Entry Price:</b> <code>${entry}</code>\n` : '') +
-        (target != null ? `<b>Target (TP):</b> <code>${target}</code>\n` : '') +
-        (stop != null ? `<b>Stop Loss:</b> <code>${stop}</code>\n` : '') +
-        `Price entered the institutional order block zone and is actively monitoring.\n\n` +
+        (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
+        (observedPrice != null ? `<b>Current:</b> <code>${observedPrice}</code>\n` : '') +
+        (stop != null ? `<b>SL:</b> <code>${stop}</code>\n` : '') +
+        (target != null ? `<b>TP:</b> <code>${target}</code>\n` : '') +
+        `<b>R:R:</b> ${rr}R\n\n` +
+        `Trade is now active.\n\n` +
         `<b>Setup ID:</b> <code>${setupId}</code>`
       );
     }
@@ -225,6 +252,7 @@ class TelegramAlertDispatcher {
     const symClean = symbol.replace('/', '').toUpperCase();
     const users = await TelegramUser.find({
       isConnected: true,
+      isAuthorized: true,
       chatId: { $exists: true },
       'settings.isMuted': false,
       watchlist: { $in: [symClean, symbol] },

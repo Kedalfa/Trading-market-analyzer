@@ -1,11 +1,11 @@
-import { Candle } from '@/types/market';
-import { SwingPoint, StructureBreak, MarketStructureResult } from '@/types/structure';
+import { Candle } from '../../types/market';
+import { SwingPoint, StructureBreak, MarketStructureResult } from '../../types/structure';
 import { detectSwingPoints } from './swingDetector';
 
 export interface StructureEngineOptions {
   swingSensitivityHTF?: { left: number; right: number };
   swingSensitivityLTF?: { left: number; right: number };
-  requireBodyClose?: boolean; // If true, only candle close beyond swing constitutes valid BOS/CHoCH
+  requireBodyClose?: boolean; // If true, only candle close beyond swing constitutes valid BOS/CHoCH/MSS
 }
 
 export function analyzeMarketStructure(
@@ -14,124 +14,138 @@ export function analyzeMarketStructure(
   options: StructureEngineOptions = {}
 ): MarketStructureResult {
   const {
-    swingSensitivityHTF = { left: 5, right: 5 },
+    swingSensitivityHTF = { left: 4, right: 4 },
     swingSensitivityLTF = { left: 2, right: 2 },
-    requireBodyClose = true
+    requireBodyClose = true,
   } = options;
 
-  if (candles.length < 20) {
+  if (candles.length < 5) {
     return {
       timeframe,
       swings: [],
       breaks: [],
       currentTrend: 'RANGING',
-      internalTrend: 'RANGING'
+      internalTrend: 'RANGING',
     };
   }
 
-  // Detect External (Major) Swings
+  // 1. Detect External (Major Structure) Swings
   const externalSwings = detectSwingPoints(candles, {
     leftBars: swingSensitivityHTF.left,
     rightBars: swingSensitivityHTF.right,
     timeframe,
-    isInternal: false
+    isInternal: false,
   });
 
-  // Detect Internal (Minor) Swings
+  // 2. Detect Internal (Minor Micro-Structure) Swings
   const internalSwings = detectSwingPoints(candles, {
     leftBars: swingSensitivityLTF.left,
     rightBars: swingSensitivityLTF.right,
     timeframe,
-    isInternal: true
+    isInternal: true,
   });
 
-  // Combine and sort by candle index
-  const allSwings = [...externalSwings, ...internalSwings].sort((a, b) => a.index - b.index);
-
-  // Track structure breaks (BOS, CHoCH, MSS)
   const breaks: StructureBreak[] = [];
   let currentTrend: 'BULLISH' | 'BEARISH' | 'RANGING' = 'RANGING';
   let internalTrend: 'BULLISH' | 'BEARISH' | 'RANGING' = 'RANGING';
 
-  // Process candles forward to detect structural breaks as they occur in time
-  const activeSwings: SwingPoint[] = [];
+  // 3. Process candles chronologically forward (Zero Look-Ahead Bias)
+  const confirmedSwings: SwingPoint[] = [];
 
   for (let cIdx = 0; cIdx < candles.length; cIdx++) {
     const candle = candles[cIdx];
 
-    // Add newly confirmed external swings up to this point
-    const confirmedNow = externalSwings.filter(s => s.index + swingSensitivityHTF.right === cIdx);
-    activeSwings.push(...confirmedNow);
+    // Only make swings available for breaks once their right lookback bars have actually closed
+    const newlyConfirmed = externalSwings.filter(s => (s.confirmationIndex ?? (s.index + swingSensitivityHTF.right)) === cIdx);
+    confirmedSwings.push(...newlyConfirmed);
 
-    // Look for breaks against the most recent significant high and low
-    const recentHigh = [...activeSwings].reverse().find(s => s.type === 'HIGH');
-    const recentLow = [...activeSwings].reverse().find(s => s.type === 'LOW');
+    // Active un-broken swing highs and lows
+    const activeHighs = confirmedSwings.filter(s => s.type === 'HIGH' && !breaks.some(b => b.brokenSwing.id === s.id));
+    const activeLows = confirmedSwings.filter(s => s.type === 'LOW' && !breaks.some(b => b.brokenSwing.id === s.id));
 
-    if (recentHigh && cIdx > recentHigh.index) {
+    const recentHigh = activeHighs[activeHighs.length - 1];
+    const recentLow = activeLows[activeLows.length - 1];
+
+    // ── Bullish Break Evaluation (Breaking Swing High) ────────────────
+    if (recentHigh && cIdx > (recentHigh.confirmationIndex ?? recentHigh.index)) {
       const isBreakByClose = candle.close > recentHigh.price;
       const isBreakByWick = candle.high > recentHigh.price;
+      const isValidBreak = requireBodyClose ? isBreakByClose : isBreakByWick;
 
-      if ((requireBodyClose && isBreakByClose) || (!requireBodyClose && isBreakByWick)) {
-        // Check if this break has already been recorded
-        const alreadyBroken = breaks.some(b => b.brokenSwing.id === recentHigh.id);
-        if (!alreadyBroken) {
-          const isReversal = currentTrend === 'BEARISH';
-          const breakType = isReversal ? 'CHOCH' : 'BOS';
-          const isMSS = isReversal && (candle.close - candle.open) > (candle.high - candle.low) * 0.6; // Strong body
+      if (isValidBreak) {
+        const candleRange = Math.max(0.00001, candle.high - candle.low);
+        const bodySize = Math.max(0, candle.close - candle.open);
+        const isDisplacementBody = (bodySize / candleRange) >= 0.55 && isBreakByClose;
 
-          breaks.push({
-            id: `break-${breakType}-${candle.timestamp}`,
-            breakType: isMSS ? 'MSS' : breakType,
-            direction: 'BULLISH',
-            brokenSwing: recentHigh,
-            breakingCandleIndex: cIdx,
-            breakingTimestamp: candle.timestamp,
-            breakPrice: recentHigh.price,
-            candleClosePrice: candle.close,
-            isWickBreakOnly: !isBreakByClose && isBreakByWick,
-            timeframe,
-            confidence: isBreakByClose ? 90 : 60,
-            description: `${breakType} Bullish: Price ${isBreakByClose ? 'closed above' : 'wicked through'} swing high at ${recentHigh.price.toFixed(4)}`
-          });
+        const isReversal = currentTrend === 'BEARISH';
+        let breakType: 'BOS' | 'CHOCH' | 'MSS' = 'BOS';
 
-          currentTrend = 'BULLISH';
+        if (isReversal) {
+          breakType = isDisplacementBody ? 'MSS' : 'CHOCH';
+        } else {
+          breakType = 'BOS';
         }
+
+        breaks.push({
+          id: `break-${breakType}-${candle.timestamp}`,
+          breakType,
+          direction: 'BULLISH',
+          brokenSwing: recentHigh,
+          breakingCandleIndex: cIdx,
+          breakingTimestamp: candle.timestamp,
+          breakPrice: recentHigh.price,
+          candleClosePrice: candle.close,
+          isWickBreakOnly: !isBreakByClose && isBreakByWick,
+          timeframe,
+          confidence: isBreakByClose ? (isDisplacementBody ? 95 : 85) : 60,
+          description: `${breakType} Bullish: Price closed decisively above confirmed swing high (${recentHigh.price.toFixed(4)}) with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
+        });
+
+        currentTrend = 'BULLISH';
       }
     }
 
-    if (recentLow && cIdx > recentLow.index) {
+    // ── Bearish Break Evaluation (Breaking Swing Low) ─────────────────
+    if (recentLow && cIdx > (recentLow.confirmationIndex ?? recentLow.index)) {
       const isBreakByClose = candle.close < recentLow.price;
       const isBreakByWick = candle.low < recentLow.price;
+      const isValidBreak = requireBodyClose ? isBreakByClose : isBreakByWick;
 
-      if ((requireBodyClose && isBreakByClose) || (!requireBodyClose && isBreakByWick)) {
-        const alreadyBroken = breaks.some(b => b.brokenSwing.id === recentLow.id);
-        if (!alreadyBroken) {
-          const isReversal = currentTrend === 'BULLISH';
-          const breakType = isReversal ? 'CHOCH' : 'BOS';
-          const isMSS = isReversal && (candle.open - candle.close) > (candle.high - candle.low) * 0.6;
+      if (isValidBreak) {
+        const candleRange = Math.max(0.00001, candle.high - candle.low);
+        const bodySize = Math.max(0, candle.open - candle.close);
+        const isDisplacementBody = (bodySize / candleRange) >= 0.55 && isBreakByClose;
 
-          breaks.push({
-            id: `break-${breakType}-${candle.timestamp}`,
-            breakType: isMSS ? 'MSS' : breakType,
-            direction: 'BEARISH',
-            brokenSwing: recentLow,
-            breakingCandleIndex: cIdx,
-            breakingTimestamp: candle.timestamp,
-            breakPrice: recentLow.price,
-            candleClosePrice: candle.close,
-            isWickBreakOnly: !isBreakByClose && isBreakByWick,
-            timeframe,
-            confidence: isBreakByClose ? 90 : 60,
-            description: `${breakType} Bearish: Price ${isBreakByClose ? 'closed below' : 'wicked through'} swing low at ${recentLow.price.toFixed(4)}`
-          });
+        const isReversal = currentTrend === 'BULLISH';
+        let breakType: 'BOS' | 'CHOCH' | 'MSS' = 'BOS';
 
-          currentTrend = 'BEARISH';
+        if (isReversal) {
+          breakType = isDisplacementBody ? 'MSS' : 'CHOCH';
+        } else {
+          breakType = 'BOS';
         }
+
+        breaks.push({
+          id: `break-${breakType}-${candle.timestamp}`,
+          breakType,
+          direction: 'BEARISH',
+          brokenSwing: recentLow,
+          breakingCandleIndex: cIdx,
+          breakingTimestamp: candle.timestamp,
+          breakPrice: recentLow.price,
+          candleClosePrice: candle.close,
+          isWickBreakOnly: !isBreakByClose && isBreakByWick,
+          timeframe,
+          confidence: isBreakByClose ? (isDisplacementBody ? 95 : 85) : 60,
+          description: `${breakType} Bearish: Price closed decisively below confirmed swing low (${recentLow.price.toFixed(4)}) with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
+        });
+
+        currentTrend = 'BEARISH';
       }
     }
   }
 
-  // Derive internal trend from the last 3 internal swings
+  // 4. Derive Internal Trend from the last 3 internal swings
   const last3Internal = internalSwings.slice(-3);
   if (last3Internal.length >= 2) {
     const last = last3Internal[last3Internal.length - 1];
@@ -155,6 +169,6 @@ export function analyzeMarketStructure(
     lastBOS,
     lastCHoCH,
     lastMSS,
-    internalTrend
+    internalTrend,
   };
 }

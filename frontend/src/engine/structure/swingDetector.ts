@@ -24,7 +24,7 @@ export function detectSwingPoints(
     let isSwingHigh = true;
     let isSwingLow = true;
 
-    // Check left bars
+    // Check left bars (must be strictly lower for high, strictly higher for low)
     for (let l = 1; l <= leftBars; l++) {
       if (candles[i - l].high >= current.high) isSwingHigh = false;
       if (candles[i - l].low <= current.low) isSwingLow = false;
@@ -36,6 +36,9 @@ export function detectSwingPoints(
       if (candles[i + r].low < current.low) isSwingLow = false;
     }
 
+    const confirmIndex = i + rightBars;
+    const confirmTimestamp = candles[confirmIndex]?.timestamp || current.timestamp;
+
     if (isSwingHigh) {
       swings.push({
         id: `swing-high-${timeframe}-${i}-${current.timestamp}`,
@@ -46,7 +49,11 @@ export function detectSwingPoints(
         timeframe,
         strength: leftBars,
         isInternal,
-        confirmed: true
+        confirmed: true,
+        confirmationIndex: confirmIndex,
+        confirmationTimestamp: confirmTimestamp,
+        leftBars,
+        rightBars,
       });
     }
 
@@ -60,12 +67,16 @@ export function detectSwingPoints(
         timeframe,
         strength: leftBars,
         isInternal,
-        confirmed: true
+        confirmed: true,
+        confirmationIndex: confirmIndex,
+        confirmationTimestamp: confirmTimestamp,
+        leftBars,
+        rightBars,
       });
     }
   }
 
-  // Label HH, HL, LH, LL by comparing with previous same-type swing
+  // Label HH, HL, LH, LL only by comparing against confirmed previous swing of the same type
   let lastHigh: SwingPoint | null = null;
   let lastLow: SwingPoint | null = null;
 
@@ -73,15 +84,11 @@ export function detectSwingPoints(
     if (swing.type === 'HIGH') {
       if (lastHigh) {
         swing.subType = swing.price > lastHigh.price ? 'HH' : 'LH';
-      } else {
-        swing.subType = 'HH';
       }
       lastHigh = swing;
     } else {
       if (lastLow) {
         swing.subType = swing.price > lastLow.price ? 'HL' : 'LL';
-      } else {
-        swing.subType = 'HL';
       }
       lastLow = swing;
     }

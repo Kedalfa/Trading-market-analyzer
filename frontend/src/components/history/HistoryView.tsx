@@ -37,7 +37,12 @@ interface SavedAnalysis {
   setupQuality: { totalScore: number; grade: string };
   savedAt: string;
   outcome: {
-    status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+    status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'APPROACHING_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+    isApproachingEntry?: boolean;
+    entryApproachingNotified?: boolean;
+    entryTriggeredNotified?: boolean;
+    invalidatedReason?: string;
+    supersededBySetupId?: string;
     entryReachedAt?: string;
     completedAt?: string;
     resolvedAt?: string;
@@ -238,6 +243,16 @@ export function HistoryView() {
 
   const renderStatusBadge = (outcome: SavedAnalysis['outcome']) => {
     const s = outcome?.status || 'OPEN';
+
+    if (outcome?.isApproachingEntry || s === 'APPROACHING_ENTRY') {
+      return (
+        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-amber-950 text-amber-300 border border-amber-400/60 shadow-md shadow-amber-950/60 animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping inline-block" />
+          ⚠️ APPROACHING ENTRY
+        </span>
+      );
+    }
+
     switch (s) {
       case 'ENTRY_REACHED':
         return (
@@ -249,8 +264,8 @@ export function HistoryView() {
       case 'WAITING_FOR_ENTRY':
       case 'OPEN':
         return (
-          <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/40">
-            <Clock className="w-3 h-3 text-amber-400" />
+          <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800/80 text-slate-300 border border-slate-700">
+            <Clock className="w-3 h-3 text-slate-400" />
             WAITING FOR ENTRY
           </span>
         );
@@ -772,10 +787,12 @@ export function HistoryView() {
                       </div>
                     )}
 
-                    {analysis.outcome?.triggerReason && (
+                    {(analysis.outcome?.invalidatedReason || analysis.outcome?.triggerReason) && (
                       <div className="flex items-start gap-1 text-slate-300">
                         <strong className="text-slate-400 shrink-0">Resolution Fact:</strong>
-                        <span className="font-semibold text-white">{analysis.outcome.triggerReason}</span>
+                        <span className="font-semibold text-white">
+                          {analysis.outcome?.invalidatedReason || analysis.outcome?.triggerReason}
+                        </span>
                       </div>
                     )}
 

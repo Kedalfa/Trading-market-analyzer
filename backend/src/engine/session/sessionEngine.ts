@@ -1,5 +1,5 @@
-import { Candle } from '@/types/market';
-import { TradingSession, SessionStatus, SessionName } from '@/types/session';
+import { Candle } from '../../types/market';
+import { TradingSession, SessionStatus, SessionName } from '../../types/session';
 
 export function getSessionStatus(candles: Candle[], date = new Date()): SessionStatus {
   const currentUtcHour = date.getUTCHours();

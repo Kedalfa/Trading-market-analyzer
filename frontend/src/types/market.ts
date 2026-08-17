@@ -32,9 +32,14 @@ export interface RealQuote {
   ask?: number;
   spread?: number;
   timestamp: number;
+  providerTimestamp?: number;
+  receivedAt?: number;
+  dataAgeMs?: number;
   formattedTime: string;
   source: string;
-  status: 'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE';
+  status: 'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE' | 'STALE';
+  sessionName?: string;
+  isMarketOpen?: boolean;
 }
 
 export interface MultiTimeframeSelection {

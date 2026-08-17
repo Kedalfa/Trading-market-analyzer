@@ -41,12 +41,13 @@ export interface SelectedStructureInfo {
 interface TradingChartProps {
   pipeline: FullSMCPipelineResult | null;
   quote?: RealQuote;
-  dataStatus?: 'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE';
+  dataStatus?: 'LIVE' | 'MARKET_CLOSED' | 'DELAYED' | 'UNAVAILABLE' | 'STALE';
   providerName?: string;
   lastUpdated?: number;
   isRealTime?: boolean;
   errorMessage?: string;
   onSelectConcept?: (conceptId: string) => void;
+  onOpenHealthModal?: () => void;
   replayIndex?: number; // When in backtest replay mode
 }
 
@@ -59,6 +60,7 @@ export function TradingChart({
   isRealTime = true,
   errorMessage,
   onSelectConcept,
+  onOpenHealthModal,
   replayIndex,
 }: TradingChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -273,6 +275,7 @@ export function TradingChart({
         provider={providerName}
         lastUpdated={lastUpdated}
         isRealTime={isRealTime}
+        onOpenHealthModal={onOpenHealthModal}
       />
 
       {/* 2. Layer Toggles Bar & Controls */}
@@ -512,105 +515,117 @@ export function TradingChart({
             const yBottom = priceToY(fvg.bottom);
             const height = Math.max(3, Math.abs(yBottom - yTop));
             const startX = candleIndexToX(fvg.timestamp);
+            const endX = (fvg.isMitigated && fvg.mitigatedAtTimestamp)
+              ? candleIndexToX(fvg.mitigatedAtTimestamp)
+              : chartWidth;
+            const fvgWidth = Math.max(12, Math.min(chartWidth - startX, endX - startX));
 
             return (
               <g
-                key={`fvg-${fvg.id}-${fvgIdx}`}
-                className="cursor-pointer pointer-events-auto"
-                onClick={() => setSelectedStructure({
-                  type: 'FVG',
-                  title: `${isBull ? '+FVG Bullish' : '-FVG Bearish'} Imbalance Zone`,
-                  direction: fvg.type,
-                  timeframe: pipeline.timeframe,
-                  originTimestamp: fvg.timestamp,
-                  priceTop: fvg.top,
-                  priceBottom: fvg.bottom,
-                  whyDetected: `A 3-candle displacement sequence created an unmitigated price imbalance between candle 1 wick (${fvg.bottom.toFixed(decimals)}) and candle 3 wick (${fvg.top.toFixed(decimals)}). Price departed impulsively without balance, leaving an institutional retest draw.`,
-                  details: [
-                    { label: 'Zone Range', value: `${fvg.bottom.toFixed(decimals)} — ${fvg.top.toFixed(decimals)}` },
-                    { label: 'Formed At', value: `${new Date(fvg.timestamp * 1000).toUTCString()}` },
-                    { label: 'Execution Timeframe', value: pipeline.timeframe },
-                    { label: 'Status', value: fvg.isMitigated ? 'Mitigated' : 'Unmitigated (Active Draw)' },
-                  ]
-                })}
-              >
-                <rect
-                  x={Math.max(0, startX)}
-                  y={Math.min(yTop, yBottom)}
-                  width={Math.max(10, chartWidth - startX)}
-                  height={height}
-                  fill={color}
-                  fillOpacity={fvg.isMitigated ? 0.08 : 0.22}
-                  stroke={color}
-                  strokeWidth="1"
-                  strokeDasharray={fvg.isMitigated ? '2 2' : 'none'}
-                />
-                <text
-                  x={Math.max(10, startX + 4)}
-                  y={Math.min(yTop, yBottom) + 11}
-                  fill={color}
-                  fontSize="9"
-                  fontWeight="bold"
+                  key={`fvg-${fvg.id}-${fvgIdx}`}
+                  className="cursor-pointer pointer-events-auto"
+                  onClick={() => setSelectedStructure({
+                    type: 'FVG',
+                    title: `${isBull ? '+FVG Bullish' : '-FVG Bearish'} Imbalance Zone`,
+                    direction: fvg.type,
+                    timeframe: pipeline.timeframe,
+                    originTimestamp: fvg.timestamp,
+                    priceTop: fvg.top,
+                    priceBottom: fvg.bottom,
+                    whyDetected: `A 3-candle displacement sequence created an unmitigated price imbalance between candle 1 wick (${fvg.bottom.toFixed(decimals)}) and candle 3 wick (${fvg.top.toFixed(decimals)}). Price departed impulsively without balance, leaving an institutional retest draw.`,
+                    details: [
+                      { label: 'Zone Range', value: `${fvg.bottom.toFixed(decimals)} — ${fvg.top.toFixed(decimals)}` },
+                      { label: 'Formed At', value: `${new Date(fvg.timestamp * 1000).toUTCString()}` },
+                      { label: 'Execution Timeframe', value: pipeline.timeframe },
+                      { label: 'Status', value: fvg.isMitigated ? 'Mitigated' : 'Unmitigated (Active Draw)' },
+                    ]
+                  })}
                 >
-                  {isBull ? '+FVG' : '-FVG'} {fvg.isMitigated ? '(Mitigated)' : ''}
-                </text>
-              </g>
-            );
-          })}
+                  <rect
+                    x={Math.max(0, startX)}
+                    y={Math.min(yTop, yBottom)}
+                    width={fvgWidth}
+                    height={height}
+                    fill={color}
+                    fillOpacity={fvg.isMitigated ? 0.08 : 0.22}
+                    stroke={color}
+                    strokeWidth="1"
+                    strokeDasharray={fvg.isMitigated ? '2 2' : 'none'}
+                  />
+                  {fvgWidth > 45 && (
+                    <text
+                      x={Math.max(10, startX + 4)}
+                      y={Math.min(yTop, yBottom) + 11}
+                      fill={color}
+                      fontSize="9"
+                      fontWeight="bold"
+                    >
+                      {isBull ? '+FVG' : '-FVG'} {fvg.isMitigated ? '(Mit)' : ''}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
 
-          {/* Order Blocks */}
-          {layers.showOrderBlocks && pipeline.orderBlocks.map((ob, obIdx) => {
-            const isBull = ob.type === 'BULLISH';
-            const color = isBull ? '#059669' : '#dc2626';
-            const yTop = priceToY(ob.topPrice);
-            const yBottom = priceToY(ob.bottomPrice);
-            const height = Math.max(3, Math.abs(yBottom - yTop));
-            const startX = candleIndexToX(ob.originTimestamp);
+            {/* Order Blocks */}
+            {layers.showOrderBlocks && pipeline.orderBlocks.map((ob, obIdx) => {
+              const isBull = ob.type === 'BULLISH';
+              const color = isBull ? '#059669' : '#dc2626';
+              const yTop = priceToY(ob.topPrice);
+              const yBottom = priceToY(ob.bottomPrice);
+              const height = Math.max(3, Math.abs(yBottom - yTop));
+              const startX = candleIndexToX(ob.originTimestamp);
+              const endX = (ob.isMitigated && ob.mitigationTimestamp)
+                ? candleIndexToX(ob.mitigationTimestamp)
+                : chartWidth;
+              const obWidth = Math.max(12, Math.min(chartWidth - startX, endX - startX));
 
-            return (
-              <g
-                key={`ob-${ob.id}-${obIdx}`}
-                className="cursor-pointer pointer-events-auto"
-                onClick={() => setSelectedStructure({
-                  type: 'ORDER_BLOCK',
-                  title: `${isBull ? 'Bullish Demand' : 'Bearish Supply'} Order Block`,
-                  direction: ob.type,
-                  timeframe: pipeline.timeframe,
-                  originTimestamp: ob.originTimestamp,
-                  priceTop: ob.topPrice,
-                  priceBottom: ob.bottomPrice,
-                  whyDetected: ob.classificationReason || `Identified as the last ${isBull ? 'bearish' : 'bullish'} candle body prior to an explosive institutional displacement leg that broke market structure. Serves as a primary institutional mitigation entry zone.`,
-                  details: [
-                    { label: 'Zone Range', value: `${ob.bottomPrice.toFixed(decimals)} — ${ob.topPrice.toFixed(decimals)}` },
-                    { label: 'Origin Time', value: `${new Date(ob.originTimestamp * 1000).toUTCString()}` },
-                    { label: 'Classification', value: ob.validityStatus },
-                    { label: 'Mitigation Status', value: ob.isMitigated ? 'Mitigated' : 'Unmitigated (Fresh)' },
-                  ]
-                })}
-              >
-                <rect
-                  x={Math.max(0, startX)}
-                  y={Math.min(yTop, yBottom)}
-                  width={Math.max(10, chartWidth - startX)}
-                  height={height}
-                  fill={color}
-                  fillOpacity={ob.isMitigated ? 0.08 : 0.25}
-                  stroke={color}
-                  strokeWidth="1.2"
-                  strokeDasharray={ob.isMitigated ? '3 2' : 'none'}
-                />
-                <text
-                  x={Math.max(10, startX + 4)}
-                  y={Math.min(yTop, yBottom) + 11}
-                  fill={color}
-                  fontSize="9"
-                  fontWeight="bold"
+              return (
+                <g
+                  key={`ob-${ob.id}-${obIdx}`}
+                  className="cursor-pointer pointer-events-auto"
+                  onClick={() => setSelectedStructure({
+                    type: 'ORDER_BLOCK',
+                    title: `${isBull ? 'Bullish Demand' : 'Bearish Supply'} Order Block`,
+                    direction: ob.type,
+                    timeframe: pipeline.timeframe,
+                    originTimestamp: ob.originTimestamp,
+                    priceTop: ob.topPrice,
+                    priceBottom: ob.bottomPrice,
+                    whyDetected: ob.classificationReason || `Identified as the last ${isBull ? 'bearish' : 'bullish'} candle body prior to an explosive institutional displacement leg that broke market structure. Serves as a primary institutional mitigation entry zone.`,
+                    details: [
+                      { label: 'Zone Range', value: `${ob.bottomPrice.toFixed(decimals)} — ${ob.topPrice.toFixed(decimals)}` },
+                      { label: 'Origin Time', value: `${new Date(ob.originTimestamp * 1000).toUTCString()}` },
+                      { label: 'Classification', value: ob.validityStatus },
+                      { label: 'Mitigation Status', value: ob.isMitigated ? 'Mitigated' : 'Unmitigated (Fresh)' },
+                    ]
+                  })}
                 >
-                  {isBull ? 'BULLISH OB' : 'BEARISH OB'} {ob.isMitigated ? '(Mitigated)' : ''}
-                </text>
-              </g>
-            );
-          })}
+                  <rect
+                    x={Math.max(0, startX)}
+                    y={Math.min(yTop, yBottom)}
+                    width={obWidth}
+                    height={height}
+                    fill={color}
+                    fillOpacity={ob.isMitigated ? 0.08 : 0.25}
+                    stroke={color}
+                    strokeWidth="1.2"
+                    strokeDasharray={ob.isMitigated ? '3 2' : 'none'}
+                  />
+                  {obWidth > 55 && (
+                    <text
+                      x={Math.max(10, startX + 4)}
+                      y={Math.min(yTop, yBottom) + 11}
+                      fill={color}
+                      fontSize="9"
+                      fontWeight="bold"
+                    >
+                      {isBull ? 'BULL OB' : 'BEAR OB'} {ob.isMitigated ? '(Mit)' : ''}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
 
           {/* Liquidity Pools & Sweeps */}
           {layers.showLiquidity && pipeline.liquidityPools.map(pool => {

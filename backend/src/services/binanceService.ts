@@ -71,6 +71,14 @@ const BINANCE_BASE_URLS = [
   'https://api3.binance.com',
 ];
 
+export function resolveBinanceSymbol(symbolOrId: string): string {
+  const clean = symbolOrId.replace(/[\/\-_]/g, '').toUpperCase();
+  if (clean === 'XAUUSD' || clean === 'GOLD' || clean === 'XAU') {
+    return 'PAXGUSDT';
+  }
+  return clean;
+}
+
 /**
  * Fetch live candles from Binance public API with multi-endpoint redundancy and caching.
  */
@@ -79,14 +87,15 @@ export async function fetchBinanceCandles(
   timeframe: string,
   limit = 250
 ): Promise<Candle[] | null> {
-  const cacheKey = `binance:candles:${symbol}:${timeframe}:${limit}`;
+  const binanceSym = resolveBinanceSymbol(symbol);
+  const cacheKey = `binance:candles:${binanceSym}:${timeframe}:${limit}`;
   const cached = cache.get<Candle[]>(cacheKey);
   if (cached) return cached;
 
   const interval = mapToBinanceInterval(timeframe);
 
   for (const baseUrl of BINANCE_BASE_URLS) {
-    const url = `${baseUrl}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+    const url = `${baseUrl}/api/v3/klines?symbol=${encodeURIComponent(binanceSym)}&interval=${interval}&limit=${limit}`;
 
     try {
       const res = await fetch(url, {
@@ -128,11 +137,11 @@ export async function fetchBinanceCandles(
   // If all hosts timed out, check long-lived backup cache
   const backup = backupCache.get<Candle[]>(cacheKey);
   if (backup) {
-    console.warn(`[Binance] Using recent cached candle snapshot for ${symbol} due to transient network rate-limit.`);
+    console.warn(`[Binance] Using recent cached candle snapshot for ${binanceSym} due to transient network rate-limit.`);
     return backup;
   }
 
-  console.warn(`[Binance] All public endpoints failed for ${symbol}`);
+  console.warn(`[Binance] All public endpoints failed for ${binanceSym}`);
   return null;
 }
 
@@ -140,12 +149,13 @@ export async function fetchBinanceCandles(
  * Fetch genuine real-time ticker book (bid/ask/spread) from Binance
  */
 export async function fetchBinanceBookQuote(symbol: string): Promise<CryptoQuote | null> {
-  const cacheKey = `binance:quote:${symbol}`;
+  const binanceSym = resolveBinanceSymbol(symbol);
+  const cacheKey = `binance:quote:${binanceSym}`;
   const cached = cache.get<CryptoQuote>(cacheKey);
   if (cached) return cached;
 
   for (const baseUrl of BINANCE_BASE_URLS) {
-    const url = `${baseUrl}/api/v3/ticker/bookTicker?symbol=${encodeURIComponent(symbol)}`;
+    const url = `${baseUrl}/api/v3/ticker/bookTicker?symbol=${encodeURIComponent(binanceSym)}`;
 
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
@@ -156,19 +166,19 @@ export async function fetchBinanceBookQuote(symbol: string): Promise<CryptoQuote
       const ask = parseFloat(data.askPrice);
       if (isNaN(bid) || isNaN(ask)) continue;
 
-      const mid = (bid + ask) / 2;
-      const spread = parseFloat((ask - bid).toFixed(data.symbol.includes('BTC') ? 2 : 4));
+      const mid = Number(((bid + ask) / 2).toFixed(2));
+      const spread = parseFloat((ask - bid).toFixed(2));
       const now = Date.now();
 
       const quote: CryptoQuote = {
-        symbol,
+        symbol: symbol === 'XAUUSD' || symbol === 'XAU/USD' ? 'XAU/USD' : binanceSym,
         price: mid,
         bid,
         ask,
         spread,
         timestamp: now,
         formattedTime: new Date(now).toUTCString().slice(17, 25) + ' UTC',
-        source: 'Binance Public WebSocket/REST Feed',
+        source: binanceSym === 'PAXGUSDT' ? 'Binance Spot Gold Feed (PAXG)' : 'Binance Spot Market Feed',
         status: 'LIVE',
       };
 

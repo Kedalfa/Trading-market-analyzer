@@ -61,6 +61,35 @@ export async function fetchRealtimeQuote(instrumentId: string): Promise<RealQuot
   return apiFetch<RealQuote>(`/api/market-data/${instrumentId}/quote`);
 }
 
+export interface MarketDataHealthResponse {
+  systemStatus: 'HEALTHY' | 'DEGRADED';
+  timestamp: number;
+  formattedTime: string;
+  instruments: Array<{
+    instrumentId: string;
+    symbol: string;
+    displayName: string;
+    assetClass: string;
+    provider: string;
+    providerSymbol: string;
+    price: number | null;
+    bid?: number;
+    ask?: number;
+    spread?: number;
+    dataAgeMs: number | null;
+    providerTimestamp: number | null;
+    receivedAt: number | null;
+    status: 'LIVE' | 'MARKET_CLOSED' | 'STALE' | 'UNAVAILABLE';
+    session: string;
+    isMarketOpen: boolean;
+    isRealTime: boolean;
+  }>;
+}
+
+export async function fetchMarketDataHealth(): Promise<MarketDataHealthResponse> {
+  return apiFetch<MarketDataHealthResponse>('/api/market-data/health');
+}
+
 // ────────────────────────────────────────────────
 // News / Economic Calendar
 // ────────────────────────────────────────────────

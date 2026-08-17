@@ -11,6 +11,10 @@ export interface SwingPoint {
   strength: number;    // Lookback bars or confidence factor (e.g. 5, 10, 20)
   isInternal: boolean; // Internal structure vs External / Major swing
   confirmed: boolean;
+  confirmationTimestamp?: number;
+  confirmationIndex?: number;
+  leftBars?: number;
+  rightBars?: number;
 }
 
 export type BreakType = 'BOS' | 'CHOCH' | 'MSS';

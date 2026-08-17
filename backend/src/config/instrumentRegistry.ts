@@ -90,7 +90,7 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     defaultTimeframe: '15M',
     provider: 'binance',
     providerSymbol: 'ETHUSDT',
-    isActive: true,
+    isActive: false, // Deactivated from live universe per trading requirement
   },
   {
     id: 'SOLUSDT',
@@ -104,22 +104,22 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     defaultTimeframe: '15M',
     provider: 'binance',
     providerSymbol: 'SOLUSDT',
-    isActive: true,
+    isActive: false, // Deactivated from live universe per trading requirement
   },
 
-  // ── Commodities (Metals) ────────────────────────────────────────
+  // ── Commodities (Spot Metals) ───────────────────────────────────
   {
     id: 'XAUUSD',
     displaySymbol: 'XAU/USD',
-    name: 'Spot Gold / US Dollar',
+    name: 'XAU/USD — Spot Gold',
     assetClass: 'commodities',
     baseCurrency: 'XAU',
     quoteCurrency: 'USD',
     pipSize: 0.1,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
-    providerSymbol: 'GC=F', // COMEX Gold Futures continuous
+    provider: 'binance',
+    providerSymbol: 'PAXGUSDT', // London Bullion physical spot gold backed 1:1
     isActive: true,
   },
 

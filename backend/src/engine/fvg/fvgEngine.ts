@@ -1,5 +1,5 @@
-import { Candle } from '@/types/market';
-import { FairValueGap, DisplacementMove } from '@/types/smc';
+import { Candle } from '../../types/market';
+import { FairValueGap, DisplacementMove } from '../../types/smc';
 
 export interface FVGEngineOptions {
   minGapPipsMultiplier?: number; // Minimum gap threshold in terms of price %

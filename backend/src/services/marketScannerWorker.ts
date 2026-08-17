@@ -10,13 +10,13 @@ import { TelegramUser } from '../models/TelegramUser';
 import { Analysis } from '../models/Analysis';
 import { TelegramAlertLog } from '../models/TelegramAlertLog';
 import { getInstrumentMapping } from '../config/instrumentRegistry';
-import { fetchBinanceCandles } from './binanceService';
-import { fetchYahooCandles } from './yahooMarketService';
+import { getAuthoritativeCandles } from './marketDataService';
 import { getEventsForInstrument } from './newsService';
 import { runSMCPipeline } from '../engine';
 import { generateStructuredSMCAnalysis } from './aiReasoningService';
 import { telegramAlertDispatcher } from './telegramAlertDispatcher';
 import { Instrument } from '../types/market';
+import { validateTradeSetup, ACTIVE_SUPPORTED_INSTRUMENTS } from './tradeSetupValidator';
 
 export interface ScannerHealthStatus {
   isScannerRunning: boolean;
@@ -34,7 +34,7 @@ export const scannerHealth: ScannerHealthStatus = {
   isScannerRunning: false,
   lastScanTimestamp: null,
   lastScannedSymbol: null,
-  monitoredSymbols: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],
+  monitoredSymbols: ACTIVE_SUPPORTED_INSTRUMENTS,
   totalSetupsFoundToday: 0,
   totalAlertsDispatchedToday: 0,
 };
@@ -43,39 +43,25 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
   scannerHealth.lastScannedSymbol = instrumentId;
   scannerHealth.lastScanTimestamp = new Date().toISOString();
 
-  const mapping = getInstrumentMapping(instrumentId);
-  const provider = mapping?.provider || (instrumentId.includes('USDT') ? 'binance' : 'yahoo');
-
   let candles: any[] | null = null;
   let htfCandles: any[] | null = null;
 
   try {
-    if (provider === 'binance') {
-      [candles, htfCandles] = await Promise.all([
-        fetchBinanceCandles(instrumentId, timeframe, 120),
-        fetchBinanceCandles(instrumentId, '4h', 80),
-      ]);
-    } else {
-      const yahooSym = mapping?.providerSymbol || (
-        instrumentId === 'EURUSD' ? 'EURUSD=X' :
-        instrumentId === 'GBPUSD' ? 'GBPUSD=X' :
-        instrumentId === 'USDJPY' ? 'JPY=X' :
-        instrumentId === 'XAUUSD' ? 'GC=F' :
-        instrumentId === 'US500' ? '^GSPC' : '^IXIC'
-      );
-      const [res15m, res4h] = await Promise.all([
-        fetchYahooCandles(yahooSym, timeframe, 120),
-        fetchYahooCandles(yahooSym, '4h', 80),
-      ]);
-      candles = res15m?.candles || null;
-      htfCandles = res4h?.candles || null;
-    }
+    const [res15m, res4h] = await Promise.all([
+      getAuthoritativeCandles(instrumentId, timeframe, 120),
+      getAuthoritativeCandles(instrumentId, '4H', 80),
+    ]);
+    candles = res15m?.candles || null;
+    htfCandles = res4h?.candles || null;
   } catch (err) {
-    console.warn(`[MarketScanner] Feed fetch error for ${instrumentId}:`, err);
+    console.warn(`[MarketScanner] Authoritative feed fetch error for ${instrumentId}:`, err);
     return;
   }
 
   if (!candles || candles.length < 20) return;
+
+  const mapping = getInstrumentMapping(instrumentId);
+  const provider = mapping?.provider || (instrumentId.includes('USDT') || instrumentId === 'XAUUSD' ? 'binance' : 'yahoo');
 
   const instObj: Instrument = {
     id: instrumentId,
@@ -120,27 +106,81 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
     const target2 = scenario.potentialTargets[1]?.price || (isBull ? entryTop * 1.02 : entryBottom * 0.98);
     const target3 = scenario.potentialTargets[2]?.price;
 
-    const rawRisk = isBull ? (entryTop - stopLoss) : (stopLoss - entryTop);
-    const rawReward = isBull ? (target2 - entryTop) : (entryTop - target2);
-    const preciseRisk = Math.round(rawRisk * 1e8);
-    const preciseReward = Math.round(rawReward * 1e8);
-    const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
+    const entry = isBull ? entryTop : entryBottom;
+    const validation = validateTradeSetup({
+      instrumentId,
+      symbol: instObj.symbol,
+      direction: isBull ? 'BULLISH' : 'BEARISH',
+      currentPrice: pipe.lastPrice,
+      entryPrice: Number(entry.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+      stopLossPrice: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+      targetPrice: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+      invalidationPrice: Number(scenario.invalidationPrice.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+    });
 
-    // Strict R:R Gate: Only accept analyses with unrounded R:R >= 1.9R
-    if (actualRR < 1.9) {
+    // Hard Safety Gate: Never publish any setup that fails validation
+    if (!validation.isValid) {
+      console.warn(`[MarketScanner] Setup rejected for ${instObj.symbol}: ${validation.rejectionReason}`);
       return;
     }
 
-    const rr = Number(actualRR.toFixed(2));
+    const rr = Number(validation.actualRR.toFixed(2));
 
-    // Check if an existing ACTIVE open setup for this symbol is already being monitored
-    const existingOpenSetup = await Analysis.findOne({
+    // Evaluate Existing Waiting / Active Setups for this Symbol
+    const existingOpenSetups = await Analysis.find({
       symbol: instObj.symbol,
-      'outcome.status': { $in: ['OPEN', 'WAITING_FOR_ENTRY', 'ENTRY_REACHED'] },
+      'outcome.status': { $in: ['OPEN', 'WAITING_FOR_ENTRY', 'APPROACHING_ENTRY', 'ENTRY_REACHED'] },
     });
 
-    if (existingOpenSetup) {
-      // Setup is already active and tracked — avoid duplicate spam
+    // Check if an active IN-MARKET trade (ENTRY_REACHED) exists (Do NOT invalidate active trades)
+    const hasActiveLiveTrade = existingOpenSetups.some(s => s.outcome?.status === 'ENTRY_REACHED');
+
+    // Check Supercession: If existing setups are WAITING, evaluate if new structure invalidates them
+    for (const oldSetup of existingOpenSetups) {
+      if (oldSetup.outcome?.status === 'ENTRY_REACHED') {
+        // Active in-market trade continues its own lifecycle; never auto-invalidate live trades
+        continue;
+      }
+
+      // If existing waiting setup has opposing direction, new MSS/BOS directly invalidates old thesis
+      if (oldSetup.direction !== (isBull ? 'BULLISH' : 'BEARISH')) {
+        const prev = oldSetup.outcome.status;
+        oldSetup.outcome.status = 'INVALIDATED';
+        oldSetup.outcome.completedAt = new Date();
+        oldSetup.outcome.resolvedAt = new Date();
+        oldSetup.outcome.invalidatedReason = `Superseded by new ${isBull ? 'Bullish' : 'Bearish'} market structure shift`;
+        oldSetup.outcome.triggerReason = `Structural shift: New ${isBull ? 'Bullish' : 'Bearish'} setup emerged at ${pipe.lastPrice}`;
+        oldSetup.outcome.monitoringStatus = 'Resolved: Invalidated';
+        oldSetup.outcome.auditTrail.push({
+          previousStatus: prev,
+          newStatus: 'INVALIDATED',
+          timestamp: new Date(),
+          triggerPrice: pipe.lastPrice,
+          triggerReason: `Superseded by new ${isBull ? 'Bullish' : 'Bearish'} setup`,
+          observedPrice: pipe.lastPrice,
+        });
+        await oldSetup.save();
+
+        await telegramAlertDispatcher.dispatchLifecycleAlert(
+          oldSetup.analysisId,
+          oldSetup.symbol,
+          'INVALIDATED',
+          'SETUP INVALIDATED',
+          '',
+          pipe.lastPrice,
+          oldSetup
+        );
+      } else {
+        // If same direction waiting setup already exists within 0.1% price range, avoid duplicate spam
+        const priceDiff = Math.abs(oldSetup.entryPrice - entry);
+        if (priceDiff < (oldSetup.entryPrice * 0.002)) {
+          return;
+        }
+      }
+    }
+
+    if (hasActiveLiveTrade) {
+      // Live trade is active; avoid overlapping new setup alert until trade resolves
       return;
     }
 
@@ -223,13 +263,16 @@ export async function runMarketScanCycle(): Promise<void> {
   isCycleRunning = true;
 
   try {
-    // Collect all active unique symbols from connected Telegram users + default core pairs
+    // Collect all active unique symbols from connected Telegram users + default active universe
     const users = await TelegramUser.find({ isConnected: true, 'settings.isMuted': false }).lean();
-    const symbolSet = new Set<string>(['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT']);
+    const symbolSet = new Set<string>(ACTIVE_SUPPORTED_INSTRUMENTS);
 
     for (const u of users) {
       for (const s of u.watchlist) {
-        symbolSet.add(s.replace('/', '').toUpperCase());
+        const clean = s.replace(/[\/\-_]/g, '').toUpperCase();
+        if (ACTIVE_SUPPORTED_INSTRUMENTS.includes(clean)) {
+          symbolSet.add(clean);
+        }
       }
     }
 

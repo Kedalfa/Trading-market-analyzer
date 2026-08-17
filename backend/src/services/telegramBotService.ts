@@ -5,6 +5,7 @@
  * and detailed evidence-based setup breakdowns.
  */
 
+import crypto from 'crypto';
 import { config } from '../config/config';
 import { TelegramUser } from '../models/TelegramUser';
 import { TelegramAlertLog } from '../models/TelegramAlertLog';
@@ -203,6 +204,8 @@ class TelegramBotService {
 
     // Find or Auto-provision user record for this chatId
     let user = await TelegramUser.findOne({ chatId });
+    const isPreAuthorizedAdmin = chatId === 5543285096 || chatId === 7308906081;
+
     if (!user) {
       user = await TelegramUser.create({
         userId: `tg_${chatId}`,
@@ -210,6 +213,8 @@ class TelegramBotService {
         telegramUsername: fromUsername,
         firstName,
         isConnected: true,
+        isAuthorized: isPreAuthorizedAdmin,
+        authorizedAt: isPreAuthorizedAdmin ? new Date() : undefined,
         connectedAt: new Date(),
         lastActiveAt: new Date(),
         watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],
@@ -237,7 +242,39 @@ class TelegramBotService {
       if (!user.isConnected) {
         user.isConnected = true;
       }
+      if (isPreAuthorizedAdmin && !user.isAuthorized) {
+        user.isAuthorized = true;
+        user.authorizedAt = new Date();
+      }
       await user.save();
+    }
+
+    // ── Verification Code Request Handler ─────────────────────────────
+    if (command === '/request_code' || command === '/getcode') {
+      await this.handleRequestVerificationCode(chatId, user);
+      return;
+    }
+
+    // ── Verification Code Submission Handler (/verify <code> or 6-digit input) ──
+    const isSixDigitCode = /^\d{6}$/.test(rawText.trim());
+    if (command.startsWith('/verify') || isSixDigitCode) {
+      const codeInput = isSixDigitCode ? rawText.trim() : rawText.split(' ')[1]?.trim();
+      await this.handleVerifyCode(chatId, user, codeInput);
+      return;
+    }
+
+    // ── Revoke Access Handler (/revoke or /disconnect) ─────────────────
+    if (command === '/revoke' || command === '/disconnect') {
+      user.isAuthorized = false;
+      user.authorizedAt = undefined;
+      user.verificationCodeHash = undefined;
+      user.verificationExpiresAt = undefined;
+      await user.save();
+
+      await this.sendMessage(chatId, `🔒 <b>Access Revoked</b>\n\nYour Telegram account has been disconnected from private signal alerts. To reconnect, send /start and verify your account.`, {
+        parse_mode: 'HTML',
+      });
+      return;
     }
 
     // Handle /start and /start <code>
@@ -250,10 +287,29 @@ class TelegramBotService {
         return;
       }
 
+      // If user is not authorized, enforce private access gate
+      if (!user.isAuthorized) {
+        const authGateMsg = `🔒 <b>PRIVATE SIGNAL ACCESS REQUIRED</b>\n\n` +
+          `Welcome, <b>${escapeHtml(firstName)}</b>!\n\n` +
+          `This Telegram bot provides exclusive Smart Money Concepts (SMC) trade setups, live entry tracking, and automated lifecycle alerts.\n\n` +
+          `Your account is currently <b>unauthorized</b>. You must verify your account before receiving private trading signals and accessing active setups.\n\n` +
+          `<i>Click the button below to generate your single-use 6-digit verification code:</i>`;
+
+        await this.sendMessage(chatId, authGateMsg, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }],
+            ],
+          },
+        });
+        return;
+      }
+
       const welcome = `🏛️ <b>SMC MARKET ANALYZER — AI STRUCTURAL BOT</b>\n\n` +
-        `Welcome, <b>${escapeHtml(firstName)}</b>! You are connected to the institutional Smart Money Concept analysis & real-time alert engine.\n\n` +
+        `Welcome back, <b>${escapeHtml(firstName)}</b>! You are verified and connected to the institutional Smart Money Concept analysis & real-time alert engine.\n\n` +
         `⚡ <b>Institutional Confluence Engine:</b>\n` +
-        `• <b>Live Market Feeds:</b> Forex (Yahoo), Gold (COMEX), Crypto (Binance)\n` +
+        `• <b>Live Market Feeds:</b> Forex (Yahoo), Gold (Spot Gold Bullion), Crypto (Binance)\n` +
         `• <b>Deterministic SMC:</b> BOS, MSS, Sweeps, FVGs, Order Blocks, Dealing Ranges\n` +
         `• <b>Proactive Alerts:</b> Grade <b>A/A+ Setups Pushed Automatically</b>\n` +
         `• <b>Active Watchlist:</b> ${user.watchlist.join(', ')}\n\n` +
@@ -272,6 +328,19 @@ class TelegramBotService {
               { text: '⚙️ Settings', callback_data: 'cmd_settings' },
               { text: '📊 System Status', callback_data: 'cmd_status' },
             ],
+          ],
+        },
+      });
+      return;
+    }
+
+    // ── Authorization Guard for all operational commands ──────────────
+    if (!user.isAuthorized) {
+      await this.sendMessage(chatId, `🔒 <b>Access Denied — Account Verification Required</b>\n\nYou must verify your Telegram account before accessing setups, watchlists, or alerts.`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }],
           ],
         },
       });
@@ -570,7 +639,12 @@ class TelegramBotService {
     const data = cb.data;
     if (!chatId || !data) return;
 
-    if (data === 'action_stop') {
+    if (data === 'cmd_request_code') {
+      const user = await TelegramUser.findOne({ chatId });
+      if (user) {
+        await this.handleRequestVerificationCode(chatId, user);
+      }
+    } else if (data === 'action_stop') {
       await TelegramUser.updateOne({ chatId }, { $set: { 'settings.isMuted': true } });
       await this.sendMessage(chatId, '🔕 Alerts Paused. Use /resume to reactivate.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
     } else if (data === 'action_resume') {
@@ -636,6 +710,131 @@ class TelegramBotService {
         },
       });
     }
+  }
+
+  /**
+   * Generates a cryptographically secure 6-digit verification code with 10m expiry & rate limiting
+   */
+  public async handleRequestVerificationCode(chatId: number, user: any): Promise<void> {
+    const now = new Date();
+    // Rate limit: 45 seconds cooldown
+    if (user.lastCodeRequestedAt) {
+      const elapsedMs = now.getTime() - new Date(user.lastCodeRequestedAt).getTime();
+      if (elapsedMs < 45000) {
+        const waitSec = Math.ceil((45000 - elapsedMs) / 1000);
+        await this.sendMessage(chatId, `⏳ <b>Please wait ${waitSec}s</b> before requesting a new verification code.`, { parse_mode: 'HTML' });
+        return;
+      }
+    }
+
+    // Cryptographically secure 6-digit random code
+    const code = String(crypto.randomInt(100000, 1000000));
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+
+    user.verificationCodeHash = codeHash;
+    user.verificationExpiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
+    user.verificationAttempts = 0;
+    user.lastCodeRequestedAt = now;
+    await user.save();
+
+    const codeMsg = `🔑 <b>YOUR 6-DIGIT VERIFICATION CODE:</b>\n\n` +
+      `<code>${code}</code>\n\n` +
+      `⏳ <b>Expires in:</b> 10 minutes\n` +
+      `🔒 <b>Account-Bound:</b> Cryptographically tied to Telegram ID <code>${chatId}</code>\n\n` +
+      `To unlock private signals and active setups, reply with this 6-digit code or type:\n` +
+      `<code>/verify ${code}</code>`;
+
+    await this.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' });
+  }
+
+  /**
+   * Verifies submitted 6-digit code against SHA-256 hash
+   */
+  public async handleVerifyCode(chatId: number, user: any, codeInput?: string): Promise<void> {
+    if (!codeInput) {
+      await this.sendMessage(chatId, `⚠️ Please provide your 6-digit code.\nExample: <code>/verify 583214</code>`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    const code = codeInput.trim();
+    if (!/^\d{6}$/.test(code)) {
+      await this.sendMessage(chatId, `❌ Verification code must be exactly 6 digits.`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    if (!user.verificationCodeHash || !user.verificationExpiresAt) {
+      await this.sendMessage(chatId, `❌ No active verification request found. Click below to request a code:`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
+        },
+      });
+      return;
+    }
+
+    const now = new Date();
+    if (now > new Date(user.verificationExpiresAt)) {
+      user.verificationCodeHash = undefined;
+      user.verificationExpiresAt = undefined;
+      await user.save();
+      await this.sendMessage(chatId, `❌ <b>Verification Code Expired (10 min limit)</b>\n\nPlease request a new verification code:`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
+        },
+      });
+      return;
+    }
+
+    if (user.verificationAttempts >= 5) {
+      user.verificationCodeHash = undefined;
+      user.verificationExpiresAt = undefined;
+      await user.save();
+      await this.sendMessage(chatId, `❌ <b>Too many failed attempts</b>. Please request a new verification code:`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
+        },
+      });
+      return;
+    }
+
+    const submittedHash = crypto.createHash('sha256').update(code).digest('hex');
+    if (submittedHash !== user.verificationCodeHash) {
+      user.verificationAttempts = (user.verificationAttempts || 0) + 1;
+      await user.save();
+      await this.sendMessage(chatId, `❌ <b>Invalid verification code</b> (Attempt ${user.verificationAttempts} of 5). Please re-enter the correct 6-digit code.`, {
+        parse_mode: 'HTML',
+      });
+      return;
+    }
+
+    // Success: Authorize user and consume code (one-time use!)
+    user.isAuthorized = true;
+    user.authorizedAt = now;
+    user.verificationCodeHash = undefined;
+    user.verificationExpiresAt = undefined;
+    user.verificationAttempts = 0;
+    await user.save();
+
+    const successMsg = `✅ <b>VERIFICATION SUCCESSFUL — ACCESS GRANTED</b>\n\n` +
+      `Welcome to the <b>SMC Institutional Signal Engine</b>!\n\n` +
+      `⚡ <b>Privileges Unlocked:</b>\n` +
+      `• Real-Time Grade A/A+ Trade Setup Alerts\n` +
+      `• Automatic Entry Approaching & Trigger Notifications\n` +
+      `• Live Target Hit & Invalidation Updates\n` +
+      `• Complete Structural Evidence Inspections\n\n` +
+      `Use the menu below to explore active setups:`;
+
+    await this.sendMessage(chatId, successMsg, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        ...MAIN_MENU_KEYBOARD,
+        inline_keyboard: [
+          [{ text: '🎯 Active Setups', callback_data: 'cmd_setups' }, { text: '📡 Watchlist', callback_data: 'cmd_watchlist' }],
+        ],
+      },
+    });
   }
 }
 

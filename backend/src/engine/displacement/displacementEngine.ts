@@ -1,5 +1,5 @@
-import { Candle } from '@/types/market';
-import { DisplacementMove } from '@/types/smc';
+import { Candle } from '../../types/market';
+import { DisplacementMove } from '../../types/smc';
 
 export interface DisplacementEngineOptions {
   atrPeriod?: number;
