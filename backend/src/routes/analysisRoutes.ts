@@ -75,51 +75,74 @@ router.get('/export', async (req: Request, res: Response) => {
 
     const analyses = await Analysis.find(filter).sort({ savedAt: -1 }).lean();
 
-    // Generate CSV Header & Rows
+    // Generate CSV Header & Rows in standard tabular format (Excel / Google Sheets compatible)
     const csvRows: string[] = [];
     csvRows.push([
-      'Trade ID',
-      'Date (UTC)',
+      'Date',
       'Instrument',
-      'Direction',
       'Timeframe',
-      'Entry Price',
+      'Strategy',
+      'Direction',
+      'Entry',
       'Stop Loss',
-      'Target (TP)',
-      'Invalidation',
-      'R:R Ratio',
-      'Setup Grade',
-      'Setup Score',
-      'Outcome Status',
+      'Take Profit',
+      'Result',
+      'R:R',
+      'P/L',
       'Observed Price',
-      'Max Favorable (MFE)',
-      'Max Adverse (MAE)',
+      'MFE',
+      'MAE',
       'Resolution Time (Mins)',
-      'Ruleset Used',
-      'Resolution Trigger Fact',
+      'Trade ID',
+      'Resolution Fact',
     ].map(col => `"${col}"`).join(','));
 
     for (const a of analyses) {
+      const status = a.outcome?.status || 'OPEN';
+      const rr = a.riskRewardRatio || 2;
+      let resultLabel = 'Open';
+      let plR = '0.0R';
+
+      if (status === 'TARGET_HIT') {
+        resultLabel = 'Target Hit';
+        plR = `+${rr.toFixed(1)}R`;
+      } else if (status === 'STOPPED_OUT') {
+        resultLabel = 'Stopped Out';
+        plR = '-1.0R';
+      } else if (status === 'ENTRY_REACHED') {
+        resultLabel = 'Entry Reached (Active)';
+        plR = 'Active';
+      } else if (status === 'WAITING_FOR_ENTRY' || status === 'OPEN') {
+        resultLabel = 'Waiting for Entry';
+        plR = '0.0R';
+      } else if (status === 'INVALIDATED') {
+        resultLabel = 'Invalidated';
+        plR = '0.0R';
+      } else if (status === 'EXPIRED') {
+        resultLabel = 'Expired';
+        plR = '0.0R';
+      }
+
+      const dateStr = a.savedAt ? new Date(a.savedAt).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : '';
+
       const row = [
-        a.analysisId || '',
-        new Date(a.savedAt).toISOString(),
+        dateStr,
         a.symbol || '',
-        a.direction || '',
         a.timeframe || '',
-        a.entryPrice != null ? a.entryPrice : '',
-        a.stopLossPrice != null ? a.stopLossPrice : '',
-        a.targetPrice != null ? a.targetPrice : '',
-        a.invalidationPrice != null ? a.invalidationPrice : '',
-        a.riskRewardRatio != null ? a.riskRewardRatio : '',
-        a.setupQuality?.grade || '',
-        a.setupQuality?.totalScore || '',
-        a.outcome?.status || 'OPEN',
-        a.outcome?.observedPrice != null ? a.outcome.observedPrice : '',
-        a.outcome?.maxFavorableExcursion != null ? a.outcome.maxFavorableExcursion : '',
-        a.outcome?.maxAdverseExcursion != null ? a.outcome.maxAdverseExcursion : '',
-        a.outcome?.timeToResolutionMinutes != null ? a.outcome.timeToResolutionMinutes : '',
-        a.rulesetUsed || '',
-        (a.outcome?.triggerReason || '').replace(/"/g, '""'),
+        'SMC',
+        a.direction ? (a.direction.charAt(0).toUpperCase() + a.direction.slice(1).toLowerCase()) : '',
+        a.entryPrice != null ? String(a.entryPrice) : '',
+        a.stopLossPrice != null ? String(a.stopLossPrice) : '',
+        a.targetPrice != null ? String(a.targetPrice) : '',
+        resultLabel,
+        a.riskRewardRatio != null ? a.riskRewardRatio.toFixed(2) : '',
+        plR,
+        a.outcome?.observedPrice != null ? String(a.outcome.observedPrice) : '',
+        a.outcome?.maxFavorableExcursion != null ? String(a.outcome.maxFavorableExcursion) : '',
+        a.outcome?.maxAdverseExcursion != null ? String(a.outcome.maxAdverseExcursion) : '',
+        a.outcome?.timeToResolutionMinutes != null ? String(a.outcome.timeToResolutionMinutes) : '',
+        a.analysisId || '',
+        (a.outcome?.triggerReason || '').replace(/"/g, '""').replace(/\r?\n|\r/g, ' '),
       ];
       csvRows.push(row.map(val => `"${val}"`).join(','));
     }
@@ -151,11 +174,32 @@ router.get('/:analysisId/details', async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/analyses — save a new analysis snapshot (starts in OPEN status)
+ * POST /api/analyses — save a new analysis snapshot (validates R:R >= 1.9R)
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
     const body = req.body;
+
+    const isBull = body.direction === 'BULLISH';
+    const entry = Number(body.entryPrice);
+    const stop = Number(body.stopLossPrice);
+    const target = Number(body.targetPrice);
+
+    const rawRisk = isBull ? (entry - stop) : (stop - entry);
+    const rawReward = isBull ? (target - entry) : (entry - target);
+
+    // Normalize floating point representation to 8 decimals precision to eliminate IEEE 754 subtraction artifacts
+    const preciseRisk = Math.round(rawRisk * 1e8);
+    const preciseReward = Math.round(rawReward * 1e8);
+    const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
+
+    // Strict R:R Gate: Only accept setups with calculated unrounded R:R >= 1.9R
+    if (actualRR < 1.9) {
+      return res.status(400).json({
+        success: false,
+        error: `Setup rejected: Calculated Risk-to-Reward ratio (${actualRR.toFixed(4)}R) is below the required minimum of 1.9R.`,
+      });
+    }
 
     const initialOutcome = body.outcome || {
       status: 'OPEN',
@@ -173,6 +217,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     const doc = {
       ...body,
+      riskRewardRatio: Number(actualRR.toFixed(2)),
       outcome: initialOutcome,
     };
 
@@ -256,11 +301,49 @@ router.get('/', async (req: Request, res: Response) => {
     const skipNum = skip != null ? parseInt(String(skip), 10) : (pageNum - 1) * size;
 
     const [analyses, total, allFiltered] = await Promise.all([
-      Analysis.find(filter)
-        .sort({ savedAt: -1 })
-        .skip(skipNum)
-        .limit(size)
-        .lean(),
+      Analysis.aggregate([
+        { $match: filter },
+        {
+          $addFields: {
+            statusPriority: {
+              $switch: {
+                branches: [
+                  { case: { $eq: ['$outcome.status', 'ENTRY_REACHED'] }, then: 1 },
+                  { case: { $in: ['$outcome.status', ['OPEN', 'WAITING_FOR_ENTRY', 'MONITORING_PAUSED']] }, then: 2 },
+                  { case: { $in: ['$outcome.status', ['TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS']] }, then: 3 },
+                ],
+                default: 4,
+              },
+            },
+            completionSortTime: {
+              $ifNull: [
+                '$outcome.completedAt',
+                {
+                  $ifNull: [
+                    '$outcome.targetHitAt',
+                    {
+                      $ifNull: [
+                        '$outcome.stoppedOutAt',
+                        { $ifNull: ['$outcome.resolvedAt', '$updatedAt'] },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        {
+          $sort: {
+            statusPriority: 1,
+            'outcome.entryReachedAt': -1,
+            completionSortTime: -1,
+            savedAt: -1,
+          },
+        },
+        { $skip: skipNum },
+        { $limit: size },
+      ]),
       Analysis.countDocuments(filter),
       Analysis.find(filter, { outcome: 1, riskRewardRatio: 1 }).lean(),
     ]);
@@ -270,6 +353,7 @@ router.get('/', async (req: Request, res: Response) => {
     let lossCount = 0;
     let breakEvenCount = 0;
     let openCount = 0;
+    let entryReachedCount = 0;
     let totalRealizedR = 0;
     let totalRRSum = 0;
     let largestWin = 0;
@@ -294,7 +378,10 @@ router.get('/', async (req: Request, res: Response) => {
         if (1 > largestLoss) largestLoss = 1;
       } else if (st === 'INVALIDATED' || st === 'EXPIRED') {
         breakEvenCount++;
-      } else if (st === 'OPEN') {
+      } else if (st === 'ENTRY_REACHED') {
+        entryReachedCount++;
+        openCount++;
+      } else if (st === 'OPEN' || st === 'WAITING_FOR_ENTRY' || st === 'MONITORING_PAUSED') {
         openCount++;
       }
     }
@@ -309,6 +396,7 @@ router.get('/', async (req: Request, res: Response) => {
       totalTrades: total,
       closedTrades,
       openTrades: openCount,
+      activeTrades: entryReachedCount,
       winningTrades: winCount,
       losingTrades: lossCount,
       breakEvenTrades: breakEvenCount,

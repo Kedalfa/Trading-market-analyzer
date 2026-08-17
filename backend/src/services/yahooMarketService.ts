@@ -8,7 +8,8 @@
 import NodeCache from 'node-cache';
 import { config } from '../config/config';
 
-const cache = new NodeCache({ stdTTL: config.marketDataCacheTtl || 15 });
+const candleCache = new NodeCache({ stdTTL: 3 }); // 3s cache for historical candle arrays
+const quoteCache = new NodeCache({ stdTTL: 1 });  // 1s cache for high-frequency tick quotes
 
 export interface RealCandle {
   timestamp: number;
@@ -51,6 +52,67 @@ export function mapTimeframeToYahoo(tf: string): { interval: string; range: stri
 }
 
 /**
+ * Fetch high-frequency real-time quote directly (< 1s latency)
+ */
+export async function fetchYahooRealtimeQuote(yahooSymbol: string): Promise<RealQuote | null> {
+  const cacheKey = `yahoo:fast_quote:${yahooSymbol}`;
+  const cached = quoteCache.get<RealQuote>(cacheKey);
+  if (cached) return cached;
+
+  const endpoints = [
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1m&range=1d`,
+    `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1m&range=1d`,
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(3000),
+      });
+
+      if (!res.ok) continue;
+
+      const data: any = await res.json();
+      const result = data?.chart?.result?.[0];
+      if (!result) continue;
+
+      const meta = result.meta || {};
+      const regularMarketPrice = meta.regularMarketPrice;
+      if (regularMarketPrice == null) continue;
+
+      const regularMarketTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : Date.now();
+      const isForex = yahooSymbol.includes('=X') && !yahooSymbol.includes('JPY');
+      const bid = meta.bid != null ? Number(Number(meta.bid).toFixed(isForex ? 5 : 2)) : undefined;
+      const ask = meta.ask != null ? Number(Number(meta.ask).toFixed(isForex ? 5 : 2)) : undefined;
+      const spread = (bid != null && ask != null) ? Number((ask - bid).toFixed(5)) : undefined;
+
+      const quote: RealQuote = {
+        symbol: yahooSymbol,
+        price: Number(regularMarketPrice),
+        bid,
+        ask,
+        spread,
+        timestamp: regularMarketTime,
+        formattedTime: new Date(regularMarketTime).toUTCString().slice(17, 25) + ' UTC',
+        source: 'Yahoo Finance Real-Time Market Feed',
+        status: 'LIVE',
+      };
+
+      quoteCache.set(cacheKey, quote);
+      return quote;
+    } catch (err) {
+      // Continue to backup endpoint
+    }
+  }
+
+  return null;
+}
+
+/**
  * Fetch genuine OHLCV candles from Yahoo Finance v8 chart API
  */
 export async function fetchYahooCandles(
@@ -59,13 +121,13 @@ export async function fetchYahooCandles(
   limit = 250
 ): Promise<{ candles: RealCandle[]; quote: RealQuote } | null> {
   const cacheKey = `yahoo:candles:${yahooSymbol}:${timeframe}:${limit}`;
-  const cached = cache.get<{ candles: RealCandle[]; quote: RealQuote }>(cacheKey);
+  const cached = candleCache.get<{ candles: RealCandle[]; quote: RealQuote }>(cacheKey);
   if (cached) return cached;
 
   const { interval, range } = mapTimeframeToYahoo(timeframe);
   const endpoints = [
-    `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}&includePrePost=true&events=div%7Csplit`,
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}&includePrePost=true&events=div%7Csplit`,
+    `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${interval}&range=${range}&includePrePost=true&events=div%7Csplit`,
   ];
 
   for (const url of endpoints) {
@@ -73,10 +135,10 @@ export async function fetchYahooCandles(
       const res = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Accept': '*/*',
+          'Accept': 'application/json',
           'Referer': 'https://finance.yahoo.com',
         },
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(6000),
       });
 
       if (!res.ok) continue;
@@ -129,8 +191,8 @@ export async function fetchYahooCandles(
       const regularMarketPrice = meta.regularMarketPrice ?? trimmedCandles[trimmedCandles.length - 1].close;
       const regularMarketTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : Date.now();
 
-      const bid = meta.bid != null ? Number(meta.bid) : undefined;
-      const ask = meta.ask != null ? Number(meta.ask) : undefined;
+      const bid = meta.bid != null ? Number(Number(meta.bid).toFixed(isForex ? 5 : 2)) : undefined;
+      const ask = meta.ask != null ? Number(Number(meta.ask).toFixed(isForex ? 5 : 2)) : undefined;
       const spread = (bid != null && ask != null) ? Number((ask - bid).toFixed(5)) : undefined;
 
       const quote: RealQuote = {
@@ -146,7 +208,7 @@ export async function fetchYahooCandles(
       };
 
       const payload = { candles: trimmedCandles, quote };
-      cache.set(cacheKey, payload);
+      candleCache.set(cacheKey, payload);
       return payload;
     } catch (err) {
       console.warn(`[YahooFinance] Failed endpoint ${url}:`, err);

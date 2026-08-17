@@ -2,11 +2,13 @@
  * Telegram Alert Formatter & Dispatcher
  * Formats deterministic SMC setup data and outcome lifecycle transitions into
  * high-impact, institutional Telegram alerts with deep-link inline buttons.
+ * ZERO raw code, JSON objects, or debug artifacts exposed.
  */
 
 import { config } from '../config/config';
 import { TelegramUser } from '../models/TelegramUser';
 import { TelegramAlertLog } from '../models/TelegramAlertLog';
+import { Analysis } from '../models/Analysis';
 import { telegramBot, escapeHtml, InlineKeyboardButton } from './telegramBotService';
 import { StructuredSMCAnalysis } from '../types/ai';
 import { FullSMCPipelineResult } from '../engine';
@@ -36,7 +38,6 @@ class TelegramAlertDispatcher {
     const isForex = params.symbol.length === 6 && !params.symbol.includes('USDT');
     const decimals = isForex ? 5 : 2;
 
-    // Find all users who are connected, unmuted, and have this symbol in their watchlist
     const symClean = params.symbol.replace('/', '').toUpperCase();
     const users = await TelegramUser.find({
       isConnected: true,
@@ -48,24 +49,19 @@ class TelegramAlertDispatcher {
 
     if (users.length === 0) return;
 
-    // Check Quality Score threshold
     const grade = params.analysis.setupQuality.grade;
     const isHighGrade = grade === 'A+' || grade === 'A';
 
-    // Format SMC Evidence checklist with HTML escaping
     const evidenceLines = params.analysis.structuralEvidence.bulletPoints.slice(0, 5)
-      .map(pt => `✓ ${escapeHtml(pt)}`)
+      .map(pt => `• ${escapeHtml(pt)}`)
       .join('\n');
 
-    // News check
     const newsNote = escapeHtml(params.analysis.newsContext.riskWarning || 'No major conflicting high-impact event detected.');
-
-    // Session check
     const sessionNote = escapeHtml(params.analysis.sessionContext.sessionNotes || 'Active Session');
 
-    // Build Formatted HTML Message
-    const message = `🔥 <b>HIGH-QUALITY SMC SETUP</b>\n` +
-      `<b>${params.symbol}</b> — Potential <b>${params.direction}</b> Scenario\n` +
+    // Build Clean Formatted HTML Message (Zero raw JSON / code)
+    const message = `🔥 <b>HIGH-QUALITY SMC SETUP</b>\n\n` +
+      `<b>${escapeHtml(params.symbol)}</b> — Potential <b>${params.direction}</b> Scenario\n` +
       `<code>Setup ID: ${params.setupId}</code>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
       `📊 <b>MARKET STRUCTURE</b>\n` +
@@ -74,29 +70,20 @@ class TelegramAlertDispatcher {
       `• <b>Lower TF:</b> ${escapeHtml(params.analysis.marketOverview.lowerTimeframeStatus)}\n\n` +
       `💧 <b>LIQUIDITY & DRAW</b>\n` +
       `• ${escapeHtml(params.analysis.liquidityMap.nextTargetSummary)}\n\n` +
-      `🎯 <b>ENTRY ZONE</b>\n` +
-      `<code>${params.entryBottom.toFixed(decimals)} — ${params.entryTop.toFixed(decimals)}</code>\n\n` +
-      `🛑 <b>STOP LOSS</b>\n` +
-      `<code>${params.stopLoss.toFixed(decimals)}</code>\n\n` +
-      `🎯 <b>TAKE PROFIT TARGETS</b>\n` +
-      `• <b>TP1:</b> <code>${params.target1.toFixed(decimals)}</code>\n` +
-      `• <b>TP2:</b> <code>${params.target2.toFixed(decimals)}</code>\n` +
-      (params.target3 ? `• <b>TP3:</b> <code>${params.target3.toFixed(decimals)}</code>\n` : '') +
-      `\n📐 <b>RISK : REWARD</b>\n` +
-      `<code>1 : ${params.riskReward.toFixed(1)}R</code>\n` +
+      `🎯 <b>ENTRY ZONE:</b> <code>${params.entryBottom.toFixed(decimals)} — ${params.entryTop.toFixed(decimals)}</code>\n` +
+      `🛑 <b>STOP LOSS:</b> <code>${params.stopLoss.toFixed(decimals)}</code>\n` +
+      `🎯 <b>TAKE PROFIT (TP1):</b> <code>${params.target1.toFixed(decimals)}</code>\n` +
+      (params.target2 ? `🎯 <b>TAKE PROFIT (TP2):</b> <code>${params.target2.toFixed(decimals)}</code>\n` : '') +
+      `📐 <b>RISK : REWARD:</b> <code>1 : ${params.riskReward.toFixed(1)}R</code>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧠 <b>SMC CONFLUENCE EVIDENCE</b>\n` +
+      `🧠 <b>STRUCTURAL EVIDENCE</b>\n` +
       `${evidenceLines}\n\n` +
-      `📰 <b>MACRO / NEWS</b>\n` +
-      `<i>${newsNote}</i>\n\n` +
-      `🕐 <b>SESSION</b>\n` +
-      `<i>${sessionNote}</i>\n\n` +
-      `⚠️ <b>INVALIDATION TRIGGER</b>\n` +
-      `<i>${isBull ? 'Bullish' : 'Bearish'} thesis invalidated if price confirms close beyond <code>${params.invalidation.toFixed(decimals)}</code></i>\n` +
+      `📰 <b>MACRO / NEWS:</b> <i>${newsNote}</i>\n` +
+      `🕐 <b>SESSION:</b> <i>${sessionNote}</i>\n\n` +
+      `⚠️ <b>INVALIDATION:</b> <i>Price confirmed close beyond <code>${params.invalidation.toFixed(decimals)}</code></i>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧠 <b>AI STRUCTURAL ASSESSMENT</b>\n` +
-      `<b>Grade ${grade} (${params.analysis.setupQuality.totalScore}/100)</b> — High Confluence Institutional Setup.\n` +
-      `<b>Status:</b> 🟢 Monitoring`;
+      `⭐ <b>Quality:</b> Grade ${grade} (${params.analysis.setupQuality.totalScore}/100)\n` +
+      `<b>Status:</b> 🟢 Active Monitoring`;
 
     const inlineKeyboard: InlineKeyboardButton[][] = [
       [
@@ -107,14 +94,9 @@ class TelegramAlertDispatcher {
 
     for (const user of users) {
       if (!user.chatId) continue;
-
-      // Check minQuality filter
       if (user.settings.minQuality === 'HIGH' && !isHighGrade) continue;
-
-      // News filter check
       if (user.settings.newsFilter === 'BLOCK_HIGH' && params.analysis.newsContext.riskWarning) continue;
 
-      // Deduplication check: Do not re-send if already SENT successfully
       const existing = await TelegramAlertLog.findOne({
         setupId: params.setupId,
         chatId: user.chatId,
@@ -123,16 +105,11 @@ class TelegramAlertDispatcher {
       });
       if (existing) continue;
 
-      console.log(`[ALERT] Dispatching NEW_SETUP: setupId=${params.setupId}, symbol=${params.symbol}, chatId=${user.chatId}`);
-
       const sent = await telegramBot.sendMessage(user.chatId, message, {
         parse_mode: 'HTML',
         reply_markup: { inline_keyboard: inlineKeyboard },
       });
 
-      console.log(`[TELEGRAM] Message delivery result for ${user.chatId}: ${sent ? 'HTTP 200 (SENT)' : 'FAILED'}`);
-
-      // Record to audit log
       await TelegramAlertLog.create({
         setupId: params.setupId,
         chatId: user.chatId,
@@ -147,15 +124,103 @@ class TelegramAlertDispatcher {
   }
 
   /**
+   * Formats human-readable lifecycle outcome messages (Take Profit, Stop Loss, Invalidation, Expiry)
+   */
+  public formatLifecycleMessage(
+    analysisDoc: any,
+    alertType: string,
+    observedPrice?: number
+  ): string {
+    const symbol = analysisDoc?.symbol || 'Instrument';
+    const isBull = analysisDoc?.direction === 'BULLISH';
+    const dirLabel = isBull ? 'Bullish' : 'Bearish';
+    const setupId = analysisDoc?.analysisId || '';
+    const entry = analysisDoc?.entryPrice;
+    const stop = analysisDoc?.stopLossPrice;
+    const target = analysisDoc?.targetPrice;
+    const rr = analysisDoc?.riskRewardRatio ? Number(analysisDoc.riskRewardRatio).toFixed(1) : '2.0';
+
+    if (alertType === 'TP_HIT' || alertType === 'TP1' || alertType === 'TP2' || alertType === 'TP3') {
+      return (
+        `🎯 <b>TAKE PROFIT REACHED</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        `<b>Target:</b> TP1\n` +
+        (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
+        (target != null ? `<b>Take Profit:</b> <code>${target}</code>\n` : '') +
+        (observedPrice != null ? `<b>Exit Price:</b> <code>${observedPrice}</code>\n` : '') +
+        `Price reached the target level with verified structural execution.\n\n` +
+        `<b>Result:</b> Target Hit (+${rr}R)\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
+    if (alertType === 'SL_HIT' || alertType === 'SL') {
+      return (
+        `🛑 <b>STOP LOSS TRIGGERED</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
+        (stop != null ? `<b>Stop Loss:</b> <code>${stop}</code>\n` : '') +
+        (observedPrice != null ? `<b>Exit Price:</b> <code>${observedPrice}</code>\n` : '') +
+        `Price reached the stop loss protection level.\n\n` +
+        `<b>Result:</b> Stopped Out (-1.0R)\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
+    if (alertType === 'INVALIDATED') {
+      const invalidation = analysisDoc?.invalidationPrice || stop;
+      return (
+        `🚫 <b>SETUP INVALIDATED</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        (invalidation != null ? `<b>Invalidation Level:</b> <code>${invalidation}</code>\n` : '') +
+        (observedPrice != null ? `<b>Observed Price:</b> <code>${observedPrice}</code>\n` : '') +
+        `Price closed beyond the structural invalidation boundary.\n\n` +
+        `<b>Result:</b> Invalidated (0.0R)\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
+    if (alertType === 'EXPIRED') {
+      return (
+        `⏳ <b>SETUP EXPIRED</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        `The maximum 72-hour validity window elapsed without reaching entry/target.\n\n` +
+        `<b>Result:</b> Expired (0.0R)\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
+    if (alertType === 'ENTRY_TRIGGERED') {
+      return (
+        `🎯 <b>ENTRY TRIGGERED</b>\n\n` +
+        `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
+        (entry != null ? `<b>Entry Price:</b> <code>${entry}</code>\n` : '') +
+        (target != null ? `<b>Target (TP):</b> <code>${target}</code>\n` : '') +
+        (stop != null ? `<b>Stop Loss:</b> <code>${stop}</code>\n` : '') +
+        `Price entered the institutional order block zone and is actively monitoring.\n\n` +
+        `<b>Setup ID:</b> <code>${setupId}</code>`
+      );
+    }
+
+    return (
+      `🔔 <b>SMC ALERT: ${escapeHtml(symbol)}</b>\n\n` +
+      `<b>Setup ID:</b> <code>${setupId}</code>\n` +
+      (observedPrice != null ? `<b>Observed Price:</b> <code>${observedPrice}</code>\n` : '') +
+      `<b>Timestamp:</b> ${new Date().toUTCString()}`
+    );
+  }
+
+  /**
    * Dispatches an OUTCOME / LIFECYCLE alert
    */
   public async dispatchLifecycleAlert(
     setupId: string,
     symbol: string,
     alertType: 'ENTRY_APPROACHING' | 'ENTRY_TRIGGERED' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TP_HIT' | 'SL_HIT' | 'INVALIDATED' | 'EXPIRED',
-    title: string,
-    description: string,
-    observedPrice?: number
+    _unusedTitle: string,
+    _unusedDescription: string,
+    observedPrice?: number,
+    analysisDoc?: any
   ): Promise<void> {
     const symClean = symbol.replace('/', '').toUpperCase();
     const users = await TelegramUser.find({
@@ -167,26 +232,14 @@ class TelegramAlertDispatcher {
 
     if (users.length === 0) return;
 
-    let icon = '🔔';
-    if (alertType === 'ENTRY_APPROACHING') icon = '⚠️';
-    if (alertType === 'ENTRY_TRIGGERED') icon = '🎯';
-    if (alertType.startsWith('TP')) icon = '💰';
-    if (alertType === 'SL' || alertType === 'SL_HIT') icon = '🛑';
-    if (alertType === 'INVALIDATED') icon = '🚫';
-    if (alertType === 'EXPIRED') icon = '⏳';
-
-    const message = `${icon} <b>SMC ALERT: ${escapeHtml(title)}</b>\n` +
-      `<b>${symbol}</b> — <code>${setupId}</code>\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `${escapeHtml(description)}\n\n` +
-      (observedPrice != null ? `• <b>Observed Market Price:</b> <code>${observedPrice}</code>\n` : '') +
-      `• <b>Timestamp:</b> ${new Date().toUTCString()}\n` +
-      `━━━━━━━━━━━━━━━━━━━━`;
+    // Load full analysis snapshot if not directly provided
+    const analysis = analysisDoc || (await Analysis.findOne({ analysisId: setupId }).lean());
+    const message = this.formatLifecycleMessage(analysis || { symbol, analysisId: setupId }, alertType, observedPrice);
 
     const inlineKeyboard: InlineKeyboardButton[][] = [
       [
         { text: '🎯 View Setup Details', callback_data: `view_setup_${setupId}` },
-        { text: '📊 Active Setups', callback_data: 'cmd_setups' },
+        { text: '📋 Active Setups', callback_data: 'cmd_setups' },
       ],
     ];
 
@@ -229,7 +282,7 @@ class TelegramAlertDispatcher {
         symbol,
         alertType,
         stage: alertType,
-        message: description.slice(0, 300),
+        message: `${alertType} for ${symbol}`,
         deliveryStatus: sent ? 'SENT' : 'FAILED',
       });
     }

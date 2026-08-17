@@ -24,7 +24,11 @@ const auditEntrySchema = new Schema<IAuditEntry>(
 );
 
 export interface IAnalysisOutcome {
-  status: 'OPEN' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+  status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+  entryReachedAt?: Date;
+  completedAt?: Date;
+  targetHitAt?: Date;
+  stoppedOutAt?: Date;
   resolvedAt?: Date;
   triggerPrice?: number;
   triggerReason?: string;
@@ -105,10 +109,14 @@ const analysisSchema = new Schema<IAnalysis>(
     outcome: {
       status: {
         type: String,
-        enum: ['OPEN', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS', 'MONITORING_PAUSED'],
+        enum: ['OPEN', 'WAITING_FOR_ENTRY', 'ENTRY_REACHED', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS', 'MONITORING_PAUSED'],
         default: 'OPEN',
         index: true,
       },
+      entryReachedAt: Date,
+      completedAt: { type: Date, index: true },
+      targetHitAt: Date,
+      stoppedOutAt: Date,
       resolvedAt: Date,
       triggerPrice: Number,
       triggerReason: String,
@@ -126,6 +134,5 @@ const analysisSchema = new Schema<IAnalysis>(
 );
 
 analysisSchema.index({ symbol: 1, timeframe: 1, savedAt: -1 });
-analysisSchema.index({ 'outcome.status': 1 });
 
 export const Analysis = model<IAnalysis>('Analysis', analysisSchema);

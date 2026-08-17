@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect } from 'react';
 import { Instrument } from '@/types/market';
-import { STRATEGY_RULESETS } from '@/engine/rulesets/smcRulesets';
 import { SessionStatus } from '@/types/session';
 import {
   Activity, Clock, Upload, BookOpen,
@@ -15,8 +14,6 @@ interface HeaderProps {
   onSelectInstrument: (inst: Instrument) => void;
   selectedTimeframe: string;
   onSelectTimeframe: (tf: string) => void;
-  selectedRuleset: string;
-  onSelectRuleset: (ruleId: string) => void;
   sessionStatus?: SessionStatus;
   onOpenVisionModal: () => void;
   onOpenTelegramModal: () => void;
@@ -32,8 +29,6 @@ export function Header({
   onSelectInstrument,
   selectedTimeframe,
   onSelectTimeframe,
-  selectedRuleset,
-  onSelectRuleset,
   sessionStatus,
   onOpenVisionModal,
   onOpenTelegramModal,
@@ -76,9 +71,9 @@ export function Header({
 
   return (
     <header className="flex flex-col border-b border-[#1e293b] bg-[#0c1222] sticky top-0 z-30">
-      {/* Top Main Navigation Bar */}
+      {/* Top Main Navigation Bar (Always Visible) */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-[#17223b]">
-        {/* Brand Logo & Clean Platform Title */}
+        {/* Brand Logo & Platform Title */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 shadow-lg shadow-blue-500/20">
             <Cpu className="w-5 h-5 text-white" />
@@ -162,61 +157,55 @@ export function Header({
         </div>
       </div>
 
-      {/* Sub-bar: Instrument, Timeframe, Ruleset Controls */}
-      <div className="flex flex-wrap items-center justify-between px-5 py-2.5 bg-[#090f1d] gap-3 text-xs">
-        {/* Instrument Selector — dynamically loaded from MongoDB */}
-        <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-medium">Instrument:</span>
-          <select
-            value={selectedInstrument.id}
-            onChange={e => {
-              const inst = instruments.find(i => i.id === e.target.value);
-              if (inst) onSelectInstrument(inst);
-            }}
-            className="bg-[#0e1628] border border-[#1e293b] text-white font-semibold rounded-lg px-2.5 py-1 focus:outline-none focus:border-blue-500 cursor-pointer"
-          >
-            {instruments.map(i => (
-              <option key={i.id} value={i.id}>
-                {i.symbol} — {i.name} ({i.assetClass.toUpperCase()})
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Timeframe Buttons */}
-        <div className="flex items-center gap-1.5">
-          <span className="text-slate-400 font-medium mr-1">Timeframe:</span>
-          {TIMEFRAMES.map(tf => (
-            <button
-              key={tf}
-              onClick={() => onSelectTimeframe(tf)}
-              className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
-                selectedTimeframe === tf
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800/40 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
+      {/* Contextual Market Analyzer Sub-bar (ONLY rendered when activeTab === 'analyzer') */}
+      {activeTab === 'analyzer' && (
+        <div className="flex flex-wrap items-center justify-between px-5 py-2.5 bg-[#090f1d] gap-3 text-xs border-t border-[#17223b]/50">
+          {/* Instrument Selector — dynamically loaded from MongoDB */}
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 font-medium">Instrument:</span>
+            <select
+              value={selectedInstrument.id}
+              onChange={e => {
+                const inst = instruments.find(i => i.id === e.target.value);
+                if (inst) onSelectInstrument(inst);
+              }}
+              className="bg-[#0e1628] border border-[#1e293b] text-white font-semibold rounded-lg px-2.5 py-1 focus:outline-none focus:border-blue-500 cursor-pointer"
             >
-              {tf === '1M_MIN' ? '1m' : tf}
-            </button>
-          ))}
-        </div>
+              {instruments.map(i => (
+                <option key={i.id} value={i.id}>
+                  {i.symbol} — {i.name} ({i.assetClass.toUpperCase()})
+                </option>
+              ))}
+            </select>
+          </div>
 
-        {/* Strategy Ruleset Selector */}
-        <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-medium">Strategy Ruleset:</span>
-          <select
-            value={selectedRuleset}
-            onChange={e => onSelectRuleset(e.target.value)}
-            className="bg-[#0e1628] border border-[#1e293b] text-blue-300 font-semibold rounded-lg px-2.5 py-1 focus:outline-none focus:border-blue-500 cursor-pointer"
-          >
-            {Object.values(STRATEGY_RULESETS).map(rule => (
-              <option key={rule.id} value={rule.id}>
-                {rule.name}
-              </option>
+          {/* Timeframe Buttons */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-400 font-medium mr-1">Timeframe:</span>
+            {TIMEFRAMES.map(tf => (
+              <button
+                key={tf}
+                onClick={() => onSelectTimeframe(tf)}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                  selectedTimeframe === tf
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-800/40 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                {tf === '1M_MIN' ? '1m' : tf}
+              </button>
             ))}
-          </select>
+          </div>
+
+          {/* Fixed Strategy Badge: SMC */}
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 font-medium">Strategy:</span>
+            <span className="px-2.5 py-1 rounded-md bg-blue-950/80 text-blue-300 border border-blue-800/60 font-bold tracking-wide text-xs">
+              SMC
+            </span>
+          </div>
         </div>
-      </div>
+      )}
     </header>
   );
 }

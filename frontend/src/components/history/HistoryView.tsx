@@ -8,7 +8,7 @@ import {
   RefreshCw, Target, XCircle, AlertCircle, TrendingUp,
   Clock, Shield, Award, ChevronDown, ChevronUp, Zap, Radio,
   Sparkles, Download, FileText, Calendar, Search, Filter,
-  ChevronLeft, ChevronRight, BarChart2, PieChart, Printer
+  ChevronLeft, ChevronRight, BarChart2, PieChart, Activity
 } from 'lucide-react';
 
 interface AuditEntry {
@@ -37,7 +37,9 @@ interface SavedAnalysis {
   setupQuality: { totalScore: number; grade: string };
   savedAt: string;
   outcome: {
-    status: 'OPEN' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+    status: 'OPEN' | 'WAITING_FOR_ENTRY' | 'ENTRY_REACHED' | 'TARGET_HIT' | 'STOPPED_OUT' | 'INVALIDATED' | 'EXPIRED' | 'AMBIGUOUS' | 'MONITORING_PAUSED';
+    entryReachedAt?: string;
+    completedAt?: string;
     resolvedAt?: string;
     triggerPrice?: number;
     triggerReason?: string;
@@ -54,6 +56,7 @@ interface SummaryStats {
   totalTrades: number;
   closedTrades: number;
   openTrades: number;
+  activeTrades?: number;
   winningTrades: number;
   losingTrades: number;
   breakEvenTrades: number;
@@ -226,11 +229,6 @@ export function HistoryView() {
     window.open(url, '_blank');
   };
 
-  // Printable Report / PDF
-  const handlePrintReport = () => {
-    window.print();
-  };
-
   const gradeColor = (grade: string) => {
     if (grade === 'A+' || grade === 'A') return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30';
     if (grade === 'B') return 'text-blue-400 bg-blue-500/10 border-blue-500/30';
@@ -241,6 +239,21 @@ export function HistoryView() {
   const renderStatusBadge = (outcome: SavedAnalysis['outcome']) => {
     const s = outcome?.status || 'OPEN';
     switch (s) {
+      case 'ENTRY_REACHED':
+        return (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-emerald-950 text-emerald-300 border border-emerald-400/60 shadow-md shadow-emerald-950/60">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+            ENTRY REACHED — TRADE ACTIVE
+          </span>
+        );
+      case 'WAITING_FOR_ENTRY':
+      case 'OPEN':
+        return (
+          <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/40">
+            <Clock className="w-3 h-3 text-amber-400" />
+            WAITING FOR ENTRY
+          </span>
+        );
       case 'TARGET_HIT':
         return (
           <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 shadow-sm">
@@ -286,6 +299,199 @@ export function HistoryView() {
     }
   };
 
+  /**
+   * Dynamically renders context-aware top metric cards based on the selected tab/filter
+   */
+  const renderContextAwareMetrics = () => {
+    if (!summaryStats) return null;
+
+    // 1. ENTRY_REACHED (Trade Active)
+    if (filterStatus === 'ENTRY_REACHED') {
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl">
+          <div className="p-3 rounded-xl bg-gradient-to-b from-[#0c1a1f] to-[#0b101d] border border-emerald-500/50 text-center shadow-md shadow-emerald-950/40">
+            <span className="text-emerald-400 text-[10px] block uppercase font-bold">Active Trades (Entry Reached)</span>
+            <strong className="text-emerald-300 text-xl font-mono">
+              {summaryStats.totalTrades}
+            </strong>
+            <span className="text-[10px] text-emerald-500/80 block">In-Trade Market Execution Active</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average Planned R:R</span>
+            <strong className="text-purple-300 text-xl font-mono">{summaryStats.avgRR}R</strong>
+            <span className="text-[10px] text-slate-500 block">Active Setups Target / Risk Profile</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 2. WAITING_FOR_ENTRY (Pending Retracement)
+    if (filterStatus === 'WAITING_FOR_ENTRY') {
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl">
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-amber-500/40 text-center">
+            <span className="text-amber-400 text-[10px] block uppercase font-bold">Waiting for Entry</span>
+            <strong className="text-amber-300 text-xl font-mono">
+              {summaryStats.totalTrades}
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Pending Order Block Retracement</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average Planned R:R</span>
+            <strong className="text-purple-300 text-xl font-mono">{summaryStats.avgRR}R</strong>
+            <span className="text-[10px] text-slate-500 block">Planned Target / Risk Profile</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 3. TARGET_HIT (Completed Winners)
+    if (filterStatus === 'TARGET_HIT') {
+      return (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-emerald-500/40 text-center">
+            <span className="text-emerald-400 text-[10px] block uppercase font-bold">Target Hits</span>
+            <strong className="text-emerald-300 text-base font-mono">
+              {summaryStats.totalTrades}
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Total Winning Trades</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Realized Gain (R)</span>
+            <strong className="text-emerald-400 text-base font-mono">
+              +{summaryStats.totalRealizedR}R
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Avg +{summaryStats.avgPL}R / win</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average Target R:R</span>
+            <strong className="text-purple-300 text-base font-mono">{summaryStats.avgRR}R</strong>
+            <span className="text-[10px] text-slate-500 block">Won Target / Risk Ratio</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Profit Factor</span>
+            <strong className="text-blue-300 text-base font-mono">
+              {summaryStats.profitFactor === 999 ? '∞' : summaryStats.profitFactor}
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Zero Loss on Target Hits</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Largest Win</span>
+            <strong className="text-emerald-400 text-base font-mono">+{summaryStats.largestWin}R</strong>
+            <span className="text-[10px] text-slate-500 block">Max Single Trade Excursion</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 4. STOPPED_OUT (Completed Losses)
+    if (filterStatus === 'STOPPED_OUT') {
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-3xl">
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-rose-500/40 text-center">
+            <span className="text-rose-400 text-[10px] block uppercase font-bold">Stopped Out</span>
+            <strong className="text-rose-300 text-base font-mono">
+              {summaryStats.totalTrades}
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Total Stopped Out Trades</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Realized Loss (R)</span>
+            <strong className="text-rose-400 text-base font-mono">
+              {summaryStats.totalRealizedR}R
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Standard 1R Risk / Trade</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average Planned R:R</span>
+            <strong className="text-purple-300 text-base font-mono">{summaryStats.avgRR}R</strong>
+            <span className="text-[10px] text-slate-500 block">Planned Target / Risk Setup</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 5. INVALIDATED (Structural Bias Voided)
+    if (filterStatus === 'INVALIDATED') {
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl">
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-amber-500/40 text-center">
+            <span className="text-amber-400 text-[10px] block uppercase font-bold">Invalidated Analyses</span>
+            <strong className="text-amber-300 text-xl font-mono">
+              {summaryStats.totalTrades}
+            </strong>
+            <span className="text-[10px] text-slate-500 block">Structural Bias Voided (0.0R P/L)</span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average Planned R:R</span>
+            <strong className="text-purple-300 text-xl font-mono">{summaryStats.avgRR}R</strong>
+            <span className="text-[10px] text-slate-500 block">Pre-Invalidation R:R Plan</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 6. Default: 'ALL' Overall Dataset View
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Total Trades</span>
+          <strong className="text-white text-base font-mono">
+            {summaryStats.totalTrades}
+          </strong>
+          <span className="text-[10px] text-slate-500 block">{summaryStats.openTrades} Open / {summaryStats.closedTrades} Closed</span>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Win Rate</span>
+          <strong className={`text-base font-mono ${summaryStats.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
+            {summaryStats.winRate}%
+          </strong>
+          <span className="text-[10px] text-slate-500 block">
+            {summaryStats.winningTrades}W / {summaryStats.losingTrades}L
+          </span>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Realized R Multiple</span>
+          <strong className={`text-base font-mono ${summaryStats.totalRealizedR >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {summaryStats.totalRealizedR > 0 ? `+${summaryStats.totalRealizedR}R` : `${summaryStats.totalRealizedR}R`}
+          </strong>
+          <span className="text-[10px] text-slate-500 block">Avg {summaryStats.avgPL}R / closed</span>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Average R:R</span>
+          <strong className="text-purple-300 text-base font-mono">{summaryStats.avgRR}R</strong>
+          <span className="text-[10px] text-slate-500 block">Target / Risk ratio</span>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Profit Factor</span>
+          <strong className="text-blue-300 text-base font-mono">
+            {summaryStats.profitFactor === 999 ? '∞' : summaryStats.profitFactor}
+          </strong>
+          <span className="text-[10px] text-slate-500 block">Win R / Loss R</span>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
+          <span className="text-slate-400 text-[10px] block uppercase font-bold">Largest Win</span>
+          <strong className="text-emerald-400 text-base font-mono">+{summaryStats.largestWin}R</strong>
+          <span className="text-[10px] text-slate-500 block">{summaryStats.breakEvenTrades} Break-Even</span>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="flex-1 w-full max-w-7xl mx-auto p-4 sm:p-6 space-y-6">
       {/* Top Header & Actions */}
@@ -293,16 +499,13 @@ export function HistoryView() {
         <div>
           <div className="flex items-center gap-2">
             <History className="w-6 h-6 text-blue-400" />
-            <h1 className="text-xl font-bold text-white">Trading Journal & Analysis History</h1>
+            <h1 className="text-xl font-bold text-white">Analysis History</h1>
             {!isLoading && (
               <span className="text-xs text-slate-500 font-normal">
                 ({total} verified records matching filter)
               </span>
             )}
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Server-indexed trade journal records evaluated continuously against live ticks (Zero mock data)
-          </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -311,7 +514,7 @@ export function HistoryView() {
             onClick={handleEvaluateNow}
             disabled={isEvaluating}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all"
-            title="Trigger immediate background market data check for all OPEN analyses"
+            title="Trigger immediate background market data check for all OPEN & ACTIVE analyses"
           >
             <Zap className={`w-3.5 h-3.5 ${isEvaluating ? 'animate-spin' : ''}`} />
             {isEvaluating ? 'Checking Feeds…' : 'Evaluate Open Setups'}
@@ -327,16 +530,6 @@ export function HistoryView() {
             Export CSV
           </button>
 
-          {/* Print / PDF Report */}
-          <button
-            onClick={handlePrintReport}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs transition-all"
-            title="Print or save PDF report"
-          >
-            <Printer className="w-3.5 h-3.5 text-blue-400" />
-            Print Report
-          </button>
-
           <button
             onClick={loadAnalyses}
             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
@@ -347,52 +540,8 @@ export function HistoryView() {
         </div>
       </div>
 
-      {/* Summary Statistics Cards (Computed over currently filtered date range) */}
-      {summaryStats && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Total Analyzed</span>
-            <strong className="text-white text-base font-mono">{summaryStats.totalTrades}</strong>
-            <span className="text-[10px] text-slate-500 block">{summaryStats.openTrades} Active Open</span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Win Rate</span>
-            <strong className={`text-base font-mono ${summaryStats.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
-              {summaryStats.winRate}%
-            </strong>
-            <span className="text-[10px] text-slate-500 block">{summaryStats.winningTrades}W / {summaryStats.losingTrades}L</span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Realized R Multiple</span>
-            <strong className={`text-base font-mono ${summaryStats.totalRealizedR >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {summaryStats.totalRealizedR > 0 ? `+${summaryStats.totalRealizedR}R` : `${summaryStats.totalRealizedR}R`}
-            </strong>
-            <span className="text-[10px] text-slate-500 block">Avg {summaryStats.avgPL}R / closed</span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Average R:R</span>
-            <strong className="text-purple-300 text-base font-mono">{summaryStats.avgRR}R</strong>
-            <span className="text-[10px] text-slate-500 block">Target / Risk ratio</span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Profit Factor</span>
-            <strong className="text-blue-300 text-base font-mono">
-              {summaryStats.profitFactor === 999 ? '∞' : summaryStats.profitFactor}
-            </strong>
-            <span className="text-[10px] text-slate-500 block">Win R / Loss R</span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-center">
-            <span className="text-slate-400 text-[10px] block uppercase font-bold">Largest Win</span>
-            <strong className="text-emerald-400 text-base font-mono">+{summaryStats.largestWin}R</strong>
-            <span className="text-[10px] text-slate-500 block">{summaryStats.breakEvenTrades} Break-Even</span>
-          </div>
-        </div>
-      )}
+      {/* Dynamically Rendered Context-Aware Summary Metrics */}
+      {renderContextAwareMetrics()}
 
       {/* Filter & Search Toolbar */}
       <div className="p-4 rounded-xl bg-[#0b101d] border border-[#1e293b] space-y-3">
@@ -463,16 +612,23 @@ export function HistoryView() {
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
           <div className="flex items-center gap-2 flex-wrap">
             {/* Status Filter */}
-            <div className="flex bg-[#0e1628] p-1 rounded-lg border border-slate-800 text-xs gap-1">
-              {['ALL', 'OPEN', 'TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED'].map(s => (
+            <div className="flex bg-[#0e1628] p-1 rounded-lg border border-slate-800 text-xs gap-1 flex-wrap">
+              {[
+                { key: 'ALL', label: 'All' },
+                { key: 'ENTRY_REACHED', label: '🟢 Entry Reached' },
+                { key: 'WAITING_FOR_ENTRY', label: '⏳ Waiting Entry' },
+                { key: 'TARGET_HIT', label: 'Target Hit' },
+                { key: 'STOPPED_OUT', label: 'Stopped Out' },
+                { key: 'INVALIDATED', label: 'Invalidated' },
+              ].map(s => (
                 <button
-                  key={s}
-                  onClick={() => handleFilterChange(() => setFilterStatus(s))}
+                  key={s.key}
+                  onClick={() => handleFilterChange(() => setFilterStatus(s.key))}
                   className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
-                    filterStatus === s ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'
+                    filterStatus === s.key ? 'bg-slate-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  {s.replace('_', ' ')}
+                  {s.label}
                 </button>
               ))}
             </div>
@@ -536,11 +692,17 @@ export function HistoryView() {
           {analyses.map((analysis) => {
             const isBull = analysis.direction === 'BULLISH';
             const isExpanded = expandedAuditId === analysis.analysisId;
+            const isEntryReached = analysis.outcome?.status === 'ENTRY_REACHED';
+            const livePrice = analysis.outcome?.observedPrice ?? analysis.currentPrice;
 
             return (
               <div
                 key={analysis.analysisId}
-                className="p-4 rounded-xl bg-[#0b101d] border border-[#1e293b] hover:border-slate-700 space-y-3 transition-all flex flex-col justify-between"
+                className={`p-4 rounded-xl space-y-3 transition-all flex flex-col justify-between ${
+                  isEntryReached
+                    ? 'bg-gradient-to-b from-[#0c1a1f] to-[#0b101d] border-2 border-emerald-500/60 shadow-lg shadow-emerald-950/40'
+                    : 'bg-[#0b101d] border border-[#1e293b] hover:border-slate-700'
+                }`}
               >
                 <div>
                   {/* Top Status Bar */}
@@ -564,11 +726,21 @@ export function HistoryView() {
                     {renderStatusBadge(analysis.outcome)}
                   </div>
 
-                  {/* Price Level Matrix */}
-                  <div className="grid grid-cols-4 gap-1.5 text-center text-xs my-3">
+                  {/* Price Level Matrix (Includes live updating price) */}
+                  <div className="grid grid-cols-5 gap-1.5 text-center text-xs my-3">
                     <div className="p-2 rounded bg-[#0e1628] border border-slate-800">
                       <span className="text-slate-400 text-[10px] block">Entry Price</span>
                       <strong className="text-blue-300 font-mono">{analysis.entryPrice}</strong>
+                    </div>
+                    <div className={`p-2 rounded border ${
+                      isEntryReached
+                        ? 'bg-emerald-950/40 border-emerald-500/40'
+                        : 'bg-[#0e1628] border-slate-800'
+                    }`}>
+                      <span className="text-slate-400 text-[10px] block">Live Price</span>
+                      <strong className={`font-mono ${isEntryReached ? 'text-emerald-300 font-bold' : 'text-slate-200'}`}>
+                        {livePrice}
+                      </strong>
                     </div>
                     <div className="p-2 rounded bg-[#0e1628] border border-slate-800">
                       <span className="text-slate-400 text-[10px] block">Stop Loss</span>
@@ -588,8 +760,17 @@ export function HistoryView() {
                   <div className="p-2.5 rounded-lg bg-black/30 border border-slate-800 text-[11px] space-y-1.5">
                     <div className="flex items-center justify-between">
                       <span className="text-slate-400">Monitoring Status:</span>
-                      <span className="font-mono text-slate-200">{analysis.outcome?.monitoringStatus || 'Active'}</span>
+                      <span className={`font-mono font-semibold ${isEntryReached ? 'text-emerald-300' : 'text-slate-200'}`}>
+                        {analysis.outcome?.monitoringStatus || 'Active'}
+                      </span>
                     </div>
+
+                    {isEntryReached && analysis.outcome?.entryReachedAt && (
+                      <div className="flex items-center justify-between text-[10px] text-emerald-400 font-mono">
+                        <span>Trade Activated:</span>
+                        <span>{new Date(analysis.outcome.entryReachedAt).toUTCString().slice(17, 25)} UTC</span>
+                      </div>
+                    )}
 
                     {analysis.outcome?.triggerReason && (
                       <div className="flex items-start gap-1 text-slate-300">
@@ -666,38 +847,44 @@ export function HistoryView() {
       {/* Pagination Bar */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between p-3 rounded-xl bg-[#0b101d] border border-[#1e293b] text-xs text-slate-400">
-          <span>
-            Showing page <b>{page}</b> of <b>{totalPages}</b> ({total} total analyses)
-          </span>
+          <div>
+            Showing <strong className="text-white">{(page - 1) * pageSize + 1}</strong> to{' '}
+            <strong className="text-white">{Math.min(page * pageSize, total)}</strong> of{' '}
+            <strong className="text-white">{total}</strong> records
+          </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
+              onClick={() => handleFilterChange(() => setPage(p => Math.max(1, p - 1)))}
               disabled={page <= 1}
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200"
+              className="p-1.5 rounded-lg bg-[#0e1628] hover:bg-slate-700 disabled:opacity-30 disabled:pointer-events-none transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
 
             {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              const p = i + 1;
+              let pNum = i + 1;
+              if (totalPages > 5 && page > 3) {
+                pNum = page - 2 + i;
+                if (pNum > totalPages) pNum = totalPages - 4 + i;
+              }
               return (
                 <button
-                  key={p}
-                  onClick={() => setPage(p)}
-                  className={`w-7 h-7 rounded-lg font-semibold transition-all ${
-                    page === p ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                  key={pNum}
+                  onClick={() => handleFilterChange(() => setPage(pNum))}
+                  className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
+                    page === pNum ? 'bg-blue-600 text-white' : 'bg-[#0e1628] text-slate-400 hover:text-white'
                   }`}
                 >
-                  {p}
+                  {pNum}
                 </button>
               );
             })}
 
             <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              onClick={() => handleFilterChange(() => setPage(p => Math.min(totalPages, p + 1)))}
               disabled={page >= totalPages}
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200"
+              className="p-1.5 rounded-lg bg-[#0e1628] hover:bg-slate-700 disabled:opacity-30 disabled:pointer-events-none transition-colors"
             >
               <ChevronRight className="w-4 h-4" />
             </button>
@@ -705,11 +892,13 @@ export function HistoryView() {
         </div>
       )}
 
-      {/* Setup Detail & Reasoning Modal */}
-      <SetupDetailModal
-        analysisId={selectedDetailId}
-        onClose={() => setSelectedDetailId(null)}
-      />
+      {/* Immutable Reasoning Detail Modal */}
+      {selectedDetailId && (
+        <SetupDetailModal
+          analysisId={selectedDetailId}
+          onClose={() => setSelectedDetailId(null)}
+        />
+      )}
     </div>
   );
 }

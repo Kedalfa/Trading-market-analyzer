@@ -120,14 +120,23 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
     const target2 = scenario.potentialTargets[1]?.price || (isBull ? entryTop * 1.02 : entryBottom * 0.98);
     const target3 = scenario.potentialTargets[2]?.price;
 
-    const risk = Math.abs(entryTop - stopLoss);
-    const reward = Math.abs(target2 - entryTop);
-    const rr = risk > 0 ? Number((reward / risk).toFixed(2)) : 2.5;
+    const rawRisk = isBull ? (entryTop - stopLoss) : (stopLoss - entryTop);
+    const rawReward = isBull ? (target2 - entryTop) : (entryTop - target2);
+    const preciseRisk = Math.round(rawRisk * 1e8);
+    const preciseReward = Math.round(rawReward * 1e8);
+    const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
+
+    // Strict R:R Gate: Only accept analyses with unrounded R:R >= 1.9R
+    if (actualRR < 1.9) {
+      return;
+    }
+
+    const rr = Number(actualRR.toFixed(2));
 
     // Check if an existing ACTIVE open setup for this symbol is already being monitored
     const existingOpenSetup = await Analysis.findOne({
       symbol: instObj.symbol,
-      'outcome.status': 'OPEN',
+      'outcome.status': { $in: ['OPEN', 'WAITING_FOR_ENTRY', 'ENTRY_REACHED'] },
     });
 
     if (existingOpenSetup) {

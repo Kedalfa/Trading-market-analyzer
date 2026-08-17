@@ -269,9 +269,18 @@ export default function SMCMarketAnalyzerApp() {
       const entry = isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice;
       const stop = scenario.invalidationPrice;
       const target = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price || (isBull ? entry * 1.02 : entry * 0.98);
-      const risk = Math.abs(entry - stop);
-      const reward = Math.abs(target - entry);
-      const rr = risk > 0 ? Number((reward / risk).toFixed(2)) : 2.0;
+      const rawRisk = isBull ? (entry - stop) : (stop - entry);
+      const rawReward = isBull ? (target - entry) : (entry - target);
+      const preciseRisk = Math.round(rawRisk * 1e8);
+      const preciseReward = Math.round(rawReward * 1e8);
+      const actualRR = (preciseRisk > 0 && preciseReward > 0) ? (preciseReward / preciseRisk) : 0;
+
+      if (actualRR < 1.9) {
+        console.warn(`[Page] Setup rejected: Calculated R:R (${actualRR.toFixed(4)}R) is below the minimum required 1.9R`);
+        return;
+      }
+
+      const rr = Number(actualRR.toFixed(2));
 
       await saveAnalysis({
         analysisId: analysis.analysisId,
@@ -368,8 +377,6 @@ export default function SMCMarketAnalyzerApp() {
           onSelectInstrument={setSelectedInstrument}
           selectedTimeframe={selectedTimeframe}
           onSelectTimeframe={setSelectedTimeframe}
-          selectedRuleset={selectedRuleset}
-          onSelectRuleset={setSelectedRuleset}
           sessionStatus={pipelineResult?.sessionStatus}
           onOpenVisionModal={() => setIsVisionOpen(true)}
           onOpenTelegramModal={() => setIsTelegramOpen(true)}

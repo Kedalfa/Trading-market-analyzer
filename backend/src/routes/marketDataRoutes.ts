@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Instrument } from '../models/Instrument';
 import { getInstrumentMapping } from '../config/instrumentRegistry';
 import { fetchBinanceCandles, fetchBinanceBookQuote } from '../services/binanceService';
-import { fetchYahooCandles } from '../services/yahooMarketService';
+import { fetchYahooCandles, fetchYahooRealtimeQuote } from '../services/yahooMarketService';
 
 const router = Router();
 
@@ -66,13 +66,16 @@ router.get('/:instrumentId', async (req: Request, res: Response) => {
       );
 
       providerName = 'Yahoo Finance Institutional Feed';
-      const result = await fetchYahooCandles(yahooSymbol, timeframe, limit);
+      const [result, liveQuote] = await Promise.all([
+        fetchYahooCandles(yahooSymbol, timeframe, limit),
+        fetchYahooRealtimeQuote(yahooSymbol),
+      ]);
 
       if (result && result.candles.length > 0) {
         candles = result.candles;
-        quoteInfo = result.quote;
+        quoteInfo = liveQuote || result.quote;
         isRealTime = true;
-        dataStatus = result.quote.status || 'LIVE';
+        dataStatus = quoteInfo?.status || result.quote.status || 'LIVE';
       }
     }
 
@@ -140,9 +143,9 @@ router.get('/:instrumentId/quote', async (req: Request, res: Response) => {
         instrumentId === 'XAUUSD' ? 'GC=F' :
         instrumentId === 'US500' ? '^GSPC' : '^IXIC'
       );
-      const result = await fetchYahooCandles(yahooSymbol, '1M_MIN', 2);
-      if (result?.quote) {
-        return res.json({ success: true, data: result.quote });
+      const quote = await fetchYahooRealtimeQuote(yahooSymbol);
+      if (quote) {
+        return res.json({ success: true, data: quote });
       }
     }
 
