@@ -5,15 +5,17 @@
  * and zero fallback / hardcoded data.
  */
 
-import { getInstrumentMapping, InstrumentMapping, INSTRUMENT_REGISTRY } from '../config/instrumentRegistry';
+import { getInstrumentMapping, InstrumentMapping, INSTRUMENT_REGISTRY, resolveExnessSymbol } from '../config/instrumentRegistry';
 import { fetchBinanceCandles, fetchBinanceBookQuote, resolveBinanceSymbol, Candle } from './binanceService';
 import { fetchYahooCandles, fetchYahooRealtimeQuote, RealCandle, RealQuote } from './yahooMarketService';
+import { fetchExnessQuote, fetchExnessCandles } from './exnessService';
+import { config } from '../config/config';
 
 export interface AuthoritativeQuote {
   instrumentId: string;
   symbol: string;
   displayName: string;
-  provider: 'binance' | 'yahoo';
+  provider: 'binance' | 'yahoo' | 'exness';
   providerSymbol: string;
   price: number;
   bid?: number;
@@ -190,8 +192,39 @@ export async function getAuthoritativeQuote(instrumentId: string): Promise<Autho
   const now = Date.now();
 
   try {
-    // ── 1. Binance Feed (Crypto & Spot Gold PAXG) ─────────────────────
-    if (provider === 'binance') {
+    // ── 0. Exness Broker Feed (Priority when configured & active) ─────
+    if (config.exness.enabled && config.exness.accountId) {
+      const exnessQuote = await fetchExnessQuote(instId);
+      if (exnessQuote) {
+        const receivedAt = now;
+        const processedAt = Date.now();
+        const dataAgeMs = Math.max(0, processedAt - exnessQuote.timestamp);
+        return {
+          instrumentId: instId,
+          symbol: displaySym,
+          displayName: mapping?.name || displaySym,
+          provider: 'exness' as any,
+          providerSymbol: exnessQuote.symbol,
+          price: exnessQuote.price,
+          bid: exnessQuote.bid,
+          ask: exnessQuote.ask,
+          spread: exnessQuote.spread,
+          providerTimestamp: exnessQuote.timestamp,
+          receivedAt,
+          processedAt,
+          dataAgeMs,
+          formattedTime: exnessQuote.formattedTime,
+          source: exnessQuote.source,
+          status: 'LIVE',
+          sessionName: session.sessionName,
+          isMarketOpen: session.isOpen,
+          isRealTime: true,
+        };
+      }
+    }
+
+    // ── 1. Crypto & Spot Gold Feed (PAXG / BTC) ─────────────────────
+    if (instId.includes('USDT') || instId === 'XAUUSD' || mapping?.assetClass === 'crypto' || mapping?.assetClass === 'commodities' || provider === 'binance') {
       const binanceSym = mapping?.providerSymbol || resolveBinanceSymbol(instId);
       const quote = await fetchBinanceBookQuote(binanceSym);
       if (!quote) return null;
@@ -217,14 +250,14 @@ export async function getAuthoritativeQuote(instrumentId: string): Promise<Autho
         processedAt,
         dataAgeMs,
         formattedTime: new Date(quote.timestamp).toUTCString().slice(17, 25) + ' UTC',
-        source: instId === 'XAUUSD' ? 'Binance Spot Gold Feed (PAXG)' : 'Binance Spot Market Feed',
+        source: `Binance Spot Book (${binanceSym}) [Exness Standby]`,
         status,
         sessionName: session.sessionName,
         isMarketOpen: session.isOpen,
         isRealTime: true,
       };
 
-      console.log(`[MARKET_DATA] Instrument: ${displaySym} | Provider: Binance (${binanceSym}) | Price: ${quote.price} | Age: ${dataAgeMs}ms | Status: ${status}`);
+      console.log(`[MARKET_DATA] Instrument: ${displaySym} | Provider: BINANCE (${authQuote.providerSymbol}) | Price: ${quote.price} | Age: ${dataAgeMs}ms | Status: ${status}`);
       return authQuote;
     }
 
@@ -266,14 +299,14 @@ export async function getAuthoritativeQuote(instrumentId: string): Promise<Autho
       processedAt,
       dataAgeMs,
       formattedTime: new Date(quote.timestamp).toUTCString().slice(17, 25) + ' UTC',
-      source: 'Yahoo Finance Real-Time Market Feed',
+      source: `Yahoo Finance Feed (${yahooSym}) [Exness Standby]`,
       status,
       sessionName: session.sessionName,
       isMarketOpen: session.isOpen,
       isRealTime: session.isOpen && status === 'LIVE',
     };
 
-    console.log(`[MARKET_DATA] Instrument: ${displaySym} | Provider: Yahoo (${yahooSym}) | Price: ${quote.price} | Age: ${dataAgeMs}ms | Status: ${status}`);
+    console.log(`[MARKET_DATA] Instrument: ${displaySym} | Provider: YAHOO (${authQuote.providerSymbol}) | Price: ${quote.price} | Age: ${dataAgeMs}ms | Status: ${status}`);
     return authQuote;
   } catch (err) {
     console.error(`[MARKET_DATA] Error fetching authoritative quote for ${instrumentId}:`, err);
@@ -296,10 +329,27 @@ export async function getAuthoritativeCandles(
 } | null> {
   const mapping = getInstrumentMapping(instrumentId);
   const instId = mapping?.id || instrumentId;
-  const provider = mapping?.provider || (instId.includes('USDT') || instId === 'XAUUSD' ? 'binance' : 'yahoo');
+  const provider = mapping?.provider || 'exness';
 
   try {
-    if (provider === 'binance') {
+    // ── 0. Exness Broker Feed Priority ─────────────────────────────────
+    if (config.exness.enabled && config.exness.accountId) {
+      const [exnessCandles, quote] = await Promise.all([
+        fetchExnessCandles(instId, timeframe, limit),
+        getAuthoritativeQuote(instId),
+      ]);
+
+      if (exnessCandles && exnessCandles.length > 0) {
+        return {
+          candles: exnessCandles,
+          quote,
+          provider: `Exness Broker Feed (${config.exness.server})`,
+          status: quote?.status || 'LIVE',
+        };
+      }
+    }
+
+    if (instId.includes('USDT') || instId === 'BTCUSDT' || instId === 'ETHUSDT' || instId === 'SOLUSDT') {
       const binanceSym = mapping?.providerSymbol || resolveBinanceSymbol(instId);
       const [candles, quote] = await Promise.all([
         fetchBinanceCandles(binanceSym, timeframe, limit),
@@ -311,7 +361,23 @@ export async function getAuthoritativeCandles(
       return {
         candles,
         quote,
-        provider: instId === 'XAUUSD' ? 'Binance Spot Gold (PAXG)' : 'Binance Spot Market Feed',
+        provider: `Binance Spot Candles (${binanceSym}) [Exness Standby]`,
+        status: quote?.status || 'LIVE',
+      };
+    }
+
+    if (instId === 'XAUUSD') {
+      const [candles, quote] = await Promise.all([
+        fetchBinanceCandles('PAXGUSDT', timeframe, limit),
+        getAuthoritativeQuote(instId),
+      ]);
+
+      if (!candles || candles.length === 0) return null;
+
+      return {
+        candles,
+        quote,
+        provider: `Binance PAXG Spot Candles [Exness Standby]`,
         status: quote?.status || 'LIVE',
       };
     }
@@ -345,13 +411,13 @@ export async function getAuthoritativeCandles(
         processedAt: Date.now(),
         dataAgeMs: Date.now() - result.quote.timestamp,
         formattedTime: result.quote.formattedTime,
-        source: 'Yahoo Finance Real-Time Market Feed',
+        source: `Yahoo Finance Candles (${yahooSym}) [Exness Standby]`,
         status: result.quote.status,
         sessionName: 'Market Feed',
         isMarketOpen: result.quote.status === 'LIVE',
         isRealTime: result.quote.status === 'LIVE',
       },
-      provider: 'Yahoo Finance Institutional Feed',
+      provider: `Yahoo Finance Candles (${yahooSym}) [Exness Standby]`,
       status: quote?.status || result.quote.status,
     };
   } catch (err) {

@@ -10,7 +10,7 @@ export interface IInstrument extends Document {
   pipSize: number;
   tickSize: number;
   defaultTimeframe: string;
-  provider: 'binance' | 'yahoo' | 'custom';
+  provider: 'binance' | 'yahoo' | 'exness' | 'custom';
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -34,7 +34,7 @@ const instrumentSchema = new Schema<IInstrument>(
     provider: {
       type: String,
       required: true,
-      enum: ['binance', 'yahoo', 'custom'],
+      enum: ['binance', 'yahoo', 'exness', 'custom'],
     },
     isActive: { type: Boolean, default: true },
   },

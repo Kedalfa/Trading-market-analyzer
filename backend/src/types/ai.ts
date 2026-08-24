@@ -32,12 +32,48 @@ export interface TradingScenario {
     label: string;
     price: number;
     description: string;
+    targetType?: string;
+    targetStructureId?: string;
   }[];
   idealEntryZone: {
     topPrice: number;
     bottomPrice: number;
-    referenceZone: string; // e.g. "15M Bullish OB + FVG"
+    referenceZone: string;
   };
+  // Structural Audit & Calculation Metadata
+  isStructureIdentified: boolean;
+  entryReason: string;
+  entryStructureType: 'FVG' | 'ORDER_BLOCK' | 'BREAKER_BLOCK' | 'LIQUIDITY_SWEEP_RECLAIM' | 'DISPLACEMENT_ORIGIN' | 'PREMIUM_DISCOUNT_EQUILIBRIUM' | 'NONE';
+  entryStructureId?: string;
+  entryZoneHigh: number;
+  entryZoneLow: number;
+  supportingSwing?: {
+    type: 'SWING_HIGH' | 'SWING_LOW';
+    price: number;
+    time?: number;
+    candleIndex?: number;
+  };
+  supportingLiquidity?: {
+    type: 'BUYSIDE' | 'SELLSIDE';
+    price: number;
+    status: string;
+  };
+  timeframe: string;
+  sourceCandleIds?: number[];
+  slReason: string;
+  slStructureType: 'SWING_LOW' | 'SWING_HIGH' | 'ORDER_BLOCK_INVALIDATION' | 'FVG_INVALIDATION' | 'LIQUIDITY_SWEEP_EXTREME' | 'DEALING_RANGE_EXTREME';
+  slStructurePrice: number;
+  slBufferUsed: number;
+  tpReason: string;
+  tpStructureType: 'SWING_HIGH' | 'SWING_LOW' | 'EQUAL_HIGHS' | 'EQUAL_LOWS' | 'OPPOSING_ORDER_BLOCK' | 'OPPOSING_FVG' | 'EXTERNAL_LIQUIDITY_POOL' | 'DEALING_RANGE_EXPANSION';
+  tpStructureId?: string;
+  tpDistanceFromEntry: number;
+  calculatedRR: number;
+  currentPriceAtCreation: number;
+  entryDistance: number;
+  entryDistancePercent: number;
+  entryDistanceInATR: number;
+  entryProximityState: 'APPROACHING' | 'PENDING' | 'TOO_FAR' | 'INVALIDATED';
 }
 
 export interface StructuredSMCAnalysis {

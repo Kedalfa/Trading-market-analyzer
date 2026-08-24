@@ -12,7 +12,7 @@ export interface Instrument {
   pipSize: number;
   tickSize: number;
   defaultTimeframe: string;
-  provider: 'binance' | 'yahoo' | 'custom';
+  provider: 'binance' | 'yahoo' | 'exness' | 'custom';
 }
 
 export interface Candle {

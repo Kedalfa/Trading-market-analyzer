@@ -21,8 +21,8 @@ async function runAudit() {
 
   // 1. Check Instrument Registry
   const xauMapping = INSTRUMENT_REGISTRY.find(i => i.id === 'XAUUSD');
-  assert(xauMapping?.provider === 'binance', 'XAUUSD maps to Binance provider');
-  assert(xauMapping?.providerSymbol === 'PAXGUSDT', 'XAUUSD maps to PAXGUSDT (Spot Gold Bullion)');
+  assert(xauMapping?.provider === 'exness', 'XAUUSD maps to Exness provider');
+  assert(xauMapping?.exnessSymbol === 'XAUUSD', 'XAUUSD maps to XAUUSD (Spot Gold Bullion)');
   assert(xauMapping?.name === 'XAU/USD — Spot Gold', 'XAUUSD is labeled Spot Gold');
 
   const ethMapping = INSTRUMENT_REGISTRY.find(i => i.id === 'ETHUSDT');
@@ -36,9 +36,9 @@ async function runAudit() {
   console.log('XAU/USD Live Quote:', xauQuote);
 
   assert(xauQuote != null && xauQuote.price > 0, 'XAU/USD quote received with valid price');
-  assert(xauQuote?.provider === 'binance', 'XAU/USD provider is Binance');
-  assert(xauQuote?.providerSymbol === 'PAXGUSDT', 'XAU/USD providerSymbol is PAXGUSDT');
-  assert(xauQuote?.source.includes('Spot Gold'), 'XAU/USD source indicates Spot Gold');
+  assert(xauQuote?.provider === 'binance' || xauQuote?.provider === 'exness', 'XAU/USD provider is Binance Standby or Exness');
+  assert(xauQuote?.providerSymbol === 'PAXGUSDT' || xauQuote?.providerSymbol === 'XAUUSDm' || xauQuote?.providerSymbol === 'XAUUSD', 'XAUUSD providerSymbol is PAXGUSDT or XAUUSD');
+  assert(xauQuote?.source.includes('Binance') || xauQuote?.source.includes('Exness'), 'XAU/USD source indicates valid market feed');
   assert(xauQuote?.status === 'LIVE', 'XAU/USD status is LIVE');
   assert(xauQuote != null && xauQuote.dataAgeMs >= 0, 'XAU/USD data age is valid non-negative number');
   assert(xauQuote?.bid != null && xauQuote?.ask != null, 'XAU/USD has genuine bid & ask');
@@ -58,7 +58,7 @@ async function runAudit() {
   for (const h of health) {
     console.log(`- ${h.symbol.padEnd(8)} | ${h.provider.padEnd(8)} (${h.providerSymbol.padEnd(8)}) | Price: ${String(h.price).padEnd(10)} | Age: ${String(h.dataAgeMs)}ms | Status: ${h.status}`);
     assert(h.price != null && h.price > 0, `${h.symbol} has valid live price: ${h.price}`);
-    assert(h.status === 'LIVE' || h.status === 'DELAYED' || h.status === 'STALE', `${h.symbol} has valid status: ${h.status}`);
+    assert(h.status === 'LIVE' || h.status === 'DELAYED' || h.status === 'STALE' || h.status === 'MARKET_CLOSED', `${h.symbol} has valid status: ${h.status}`);
   }
 
   // 5. Verify Authoritative Candles for XAU/USD

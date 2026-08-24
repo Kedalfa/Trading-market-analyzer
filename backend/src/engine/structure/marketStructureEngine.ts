@@ -54,6 +54,7 @@ export function analyzeMarketStructure(
 
   for (let cIdx = 0; cIdx < candles.length; cIdx++) {
     const candle = candles[cIdx];
+    let candleAlreadyBroke = false; // Guard: only one structural break per candle
 
     // Only make swings available for breaks once their right lookback bars have actually closed
     const newlyConfirmed = externalSwings.filter(s => (s.confirmationIndex ?? (s.index + swingSensitivityHTF.right)) === cIdx);
@@ -67,7 +68,7 @@ export function analyzeMarketStructure(
     const recentLow = activeLows[activeLows.length - 1];
 
     // ── Bullish Break Evaluation (Breaking Swing High) ────────────────
-    if (recentHigh && cIdx > (recentHigh.confirmationIndex ?? recentHigh.index)) {
+    if (!candleAlreadyBroke && recentHigh && cIdx > (recentHigh.confirmationIndex ?? recentHigh.index)) {
       const isBreakByClose = candle.close > recentHigh.price;
       const isBreakByWick = candle.high > recentHigh.price;
       const isValidBreak = requireBodyClose ? isBreakByClose : isBreakByWick;
@@ -98,15 +99,16 @@ export function analyzeMarketStructure(
           isWickBreakOnly: !isBreakByClose && isBreakByWick,
           timeframe,
           confidence: isBreakByClose ? (isDisplacementBody ? 95 : 85) : 60,
-          description: `${breakType} Bullish: Price closed decisively above confirmed swing high (${recentHigh.price.toFixed(4)}) with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
+          description: `${breakType} Bullish: Price closed decisively above confirmed swing high with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
         });
 
         currentTrend = 'BULLISH';
+        candleAlreadyBroke = true;
       }
     }
 
     // ── Bearish Break Evaluation (Breaking Swing Low) ─────────────────
-    if (recentLow && cIdx > (recentLow.confirmationIndex ?? recentLow.index)) {
+    if (!candleAlreadyBroke && recentLow && cIdx > (recentLow.confirmationIndex ?? recentLow.index)) {
       const isBreakByClose = candle.close < recentLow.price;
       const isBreakByWick = candle.low < recentLow.price;
       const isValidBreak = requireBodyClose ? isBreakByClose : isBreakByWick;
@@ -137,10 +139,11 @@ export function analyzeMarketStructure(
           isWickBreakOnly: !isBreakByClose && isBreakByWick,
           timeframe,
           confidence: isBreakByClose ? (isDisplacementBody ? 95 : 85) : 60,
-          description: `${breakType} Bearish: Price closed decisively below confirmed swing low (${recentLow.price.toFixed(4)}) with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
+          description: `${breakType} Bearish: Price closed decisively below confirmed swing low with ${isDisplacementBody ? 'strong institutional displacement' : 'structural break'}.`,
         });
 
         currentTrend = 'BEARISH';
+        candleAlreadyBroke = true;
       }
     }
   }

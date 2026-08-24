@@ -33,6 +33,7 @@ import { HistoryView } from '@/components/history/HistoryView';
 import { EDUCATIONAL_CONCEPTS } from '@/services/educationalService';
 import { validateTradeSetup } from '@/services/tradeSetupValidator';
 
+
 import {
   RefreshCw, AlertTriangle, BookOpen, WifiOff,
   Activity, Shield, Cpu,
@@ -91,7 +92,6 @@ export default function SMCMarketAnalyzerApp() {
   // ── Replay mode ──────────────────────────────────────────────────
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [replayIndex, setReplayIndex] = useState<number>(0);
-  const autoSavedSetupsRef = useRef<Set<string>>(new Set());
 
   // ── 1. Bootstrap: load instruments + settings from backend ───────
   useEffect(() => {
@@ -190,71 +190,6 @@ export default function SMCMarketAnalyzerApp() {
         setHtfPipelineResult(htfPipe);
         setAnalysis(structAnalysis);
         setReplayIndex(pipe.candles.length - 1);
-
-        // Auto-persist qualified setups to Analysis History (prevent duplicates with autoSavedSetupsRef)
-        const isBull = structAnalysis.marketOverview.htfBias === 'BULLISH';
-        const scenario = isBull ? structAnalysis.scenarios.bullish : structAnalysis.scenarios.bearish;
-
-        if (structAnalysis.setupQuality.totalScore >= 75 && scenario.probabilityGrade === 'HIGH_PROBABILITY') {
-          const entry = isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice;
-          const stop = scenario.invalidationPrice;
-          const target = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price;
-
-          const validation = validateTradeSetup({
-            analysisId: structAnalysis.analysisId,
-            symbol: structAnalysis.symbol,
-            instrumentId: selectedInstrument.id,
-            direction: isBull ? 'BULLISH' : 'BEARISH',
-            currentPrice: pipe.lastPrice,
-            entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-            stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-            targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-            invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-            rulesetUsed: selectedRuleset,
-          });
-
-          if (validation.isValid && !autoSavedSetupsRef.current.has(structAnalysis.analysisId)) {
-            autoSavedSetupsRef.current.add(structAnalysis.analysisId);
-            saveAnalysis({
-              analysisId: structAnalysis.analysisId,
-              symbol: structAnalysis.symbol,
-              instrumentId: selectedInstrument.id,
-              timeframe: structAnalysis.timeframeHierarchy.intermediate,
-              htfTimeframe: structAnalysis.timeframeHierarchy.higher,
-              currentPrice: pipe.lastPrice,
-              direction: isBull ? 'BULLISH' : 'BEARISH',
-              entryPrice: Number(entry.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-              stopLossPrice: Number(stop.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-              targetPrice: Number(target.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-              invalidationPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
-              riskRewardRatio: Number(validation.actualRR.toFixed(2)),
-              rulesetUsed: selectedRuleset,
-              htfBias: structAnalysis.marketOverview.htfBias,
-              intermediateStructure: structAnalysis.marketOverview.intermediateStructure,
-              structuralEvidence: structAnalysis.structuralEvidence.bulletPoints,
-              conflictingSignals: structAnalysis.structuralEvidence.conflictingSignals,
-              bullishScenario: structAnalysis.scenarios.bullish,
-              bearishScenario: structAnalysis.scenarios.bearish,
-              setupQuality: structAnalysis.setupQuality,
-              newsRiskWarning: structAnalysis.newsContext.riskWarning,
-              sessionNotes: structAnalysis.sessionContext.sessionNotes ?? '',
-              savedAt: new Date().toISOString(),
-              outcome: {
-                status: 'OPEN',
-                monitoringStatus: 'Active Background Monitoring Initialized',
-                auditTrail: [
-                  {
-                    previousStatus: 'NEW',
-                    newStatus: 'OPEN',
-                    timestamp: new Date().toISOString(),
-                    triggerReason: 'Automatic qualification from live market scan',
-                    observedPrice: pipe.lastPrice,
-                  },
-                ],
-              },
-            }).catch(e => console.warn('[AutoSave] Skipped duplicate/error:', e));
-          }
-        }
       } catch (err: any) {
         console.error('[Pipeline] Failed:', err);
         if (isMounted) {
@@ -444,6 +379,18 @@ export default function SMCMarketAnalyzerApp() {
     );
   }
 
+  // Current Active SMC Setup for Exness execution widget
+  const isBull = analysis?.marketOverview?.htfBias === 'BULLISH';
+  const scenario = isBull ? analysis?.scenarios?.bullish : analysis?.scenarios?.bearish;
+  const currentSetup = (analysis && scenario && selectedInstrument) ? {
+    instrumentId: selectedInstrument.id,
+    symbol: selectedInstrument.symbol,
+    direction: (isBull ? 'BULLISH' : 'BEARISH') as 'BULLISH' | 'BEARISH',
+    entryPrice: Number((isBull ? scenario.idealEntryZone.topPrice : scenario.idealEntryZone.bottomPrice).toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+    stopLossPrice: Number(scenario.invalidationPrice.toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+    targetPrice: Number((scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price || (isBull ? scenario.idealEntryZone.topPrice * 1.02 : scenario.idealEntryZone.bottomPrice * 0.98)).toFixed(selectedInstrument.assetClass === 'forex' ? 5 : 2)),
+  } : undefined;
+
   // ── Main App ──────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
@@ -460,6 +407,7 @@ export default function SMCMarketAnalyzerApp() {
           onOpenTelegramModal={() => setIsTelegramOpen(true)}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          currentSetup={currentSetup}
         />
       )}
 

@@ -65,7 +65,7 @@ export function MarketDataHealthModal({ isOpen, onClose }: MarketDataHealthModal
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Real-time telemetry from authoritative institutional endpoints (Binance & Yahoo Finance)
+                Real-time telemetry from Exness Broker (MT5) & institutional market data gateway
               </p>
             </div>
           </div>
@@ -108,12 +108,11 @@ export function MarketDataHealthModal({ isOpen, onClose }: MarketDataHealthModal
                 <tr className="border-b border-[#1e293b] bg-[#0e1628] text-slate-400 text-[11px] uppercase tracking-wider">
                   <th className="py-3 px-4 font-semibold">Instrument</th>
                   <th className="py-3 px-4 font-semibold">Asset Class</th>
-                  <th className="py-3 px-4 font-semibold">Authoritative Feed</th>
+                  <th className="py-3 px-4 font-semibold">Feed Source</th>
                   <th className="py-3 px-4 font-semibold">Provider Symbol</th>
                   <th className="py-3 px-4 font-semibold text-right">Live Price</th>
                   <th className="py-3 px-4 font-semibold text-right">Bid / Ask</th>
-                  <th className="py-3 px-4 font-semibold text-center">Data Latency</th>
-                  <th className="py-3 px-4 font-semibold">Market Session</th>
+                  <th className="py-3 px-4 font-semibold text-right">Feed Age</th>
                   <th className="py-3 px-4 font-semibold text-center">Feed Status</th>
                 </tr>
               </thead>
@@ -124,8 +123,11 @@ export function MarketDataHealthModal({ isOpen, onClose }: MarketDataHealthModal
                   const isClosed = inst.status === 'MARKET_CLOSED';
 
                   return (
-                    <tr key={inst.instrumentId} className="hover:bg-slate-800/30 transition-colors">
-                      {/* Instrument */}
+                    <tr
+                      key={inst.instrumentId}
+                      className="hover:bg-slate-800/40 transition-colors"
+                    >
+                      {/* Instrument Name */}
                       <td className="py-3.5 px-4">
                         <div className="font-bold text-white font-mono">{inst.symbol}</div>
                         <div className="text-[10px] text-slate-400">{inst.displayName}</div>
@@ -141,8 +143,8 @@ export function MarketDataHealthModal({ isOpen, onClose }: MarketDataHealthModal
                       {/* Feed Source */}
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-1.5 text-slate-200 font-medium">
-                          <Globe className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                          <span className="capitalize">{inst.provider}</span>
+                          <Globe className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
+                          <span className="font-semibold">{inst.provider === 'exness' ? 'Exness (MT5)' : inst.provider}</span>
                         </div>
                       </td>
 

@@ -2,6 +2,7 @@ import { FullSMCPipelineResult } from '../engine';
 import { StructuredSMCAnalysis, TradingScenario, SetupQualityScore, SetupScoreComponent } from '../types/ai';
 import { NewsContext } from '../types/news';
 import { STRATEGY_RULESETS } from '../engine/rulesets/smcRulesets';
+import { calculateATR } from '../engine/displacement/displacementEngine';
 
 export function generateStructuredSMCAnalysis(
   pipeline: FullSMCPipelineResult,
@@ -9,91 +10,485 @@ export function generateStructuredSMCAnalysis(
   rulesetKey = 'standard_smc',
   htfPipeline?: FullSMCPipelineResult
 ): StructuredSMCAnalysis {
-  const { instrument, timeframe, lastPrice, structure, liquidityPools, displacements, fairValueGaps, orderBlocks, dealingRange, sessionStatus } = pipeline;
+  const { instrument, timeframe, lastPrice, candles, structure, liquidityPools, displacements, fairValueGaps, orderBlocks, dealingRange, sessionStatus } = pipeline;
   const ruleset = STRATEGY_RULESETS[rulesetKey] || STRATEGY_RULESETS.standard_smc;
 
-  // 1. HTF Bias & Intermediate Trend
+  // 1. Instrument-Specific Volatility & Precision Normalization
+  const isForex = instrument.assetClass === 'forex';
+  const isJpy = instrument.id.includes('JPY') || instrument.symbol.includes('JPY');
+  const decimals = isForex ? (isJpy ? 3 : 5) : 2;
+  const pipSize = instrument.pipSize > 0 ? instrument.pipSize : (isForex ? (isJpy ? 0.01 : 0.0001) : 0.1);
+
+  const atrs = calculateATR(candles, 14);
+  const currentATR = atrs.length > 0 ? atrs[atrs.length - 1] : (lastPrice * 0.002);
+  const volatilityBuffer = Math.max(pipSize * 3, currentATR * 0.15);
+
+  // 2. HTF Bias & Intermediate Trend
   const htfBias = htfPipeline ? htfPipeline.structure.currentTrend : structure.currentTrend;
   const intermediateStructure = structure.currentTrend;
 
-  // 2. Identify nearest liquidity pools
+  // 3. Liquidity Pools & Sweeps
   const buysidePools = liquidityPools.filter(p => p.direction === 'BUYSIDE' && p.price > lastPrice).sort((a, b) => a.price - b.price);
   const sellsidePools = liquidityPools.filter(p => p.direction === 'SELLSIDE' && p.price < lastPrice).sort((a, b) => b.price - a.price);
   const nearestBuyside = buysidePools[0] || null;
   const nearestSellside = sellsidePools[0] || null;
   const sweptLiquidity = liquidityPools.filter(p => p.status === 'SWEPT' || p.status === 'SWEPT_CONFIRMED');
+  const recentSweep = sweptLiquidity[sweptLiquidity.length - 1] || null;
 
-  // 3. Relevant Active Zones
+  // 4. Relevant Active Zones
   const activeOrderBlocks = orderBlocks.filter(ob => ob.validityStatus === 'ACTIVE' || ob.validityStatus === 'BREAKER');
   const unmitigatedFVGs = fairValueGaps.filter(fvg => !fvg.isMitigated);
 
-  // 4. Structural Evidence Compilation
+  const bullOB = activeOrderBlocks.find(ob => ob.type === 'BULLISH');
+  const bearOB = activeOrderBlocks.find(ob => ob.type === 'BEARISH');
+  const bullBreaker = activeOrderBlocks.find(ob => ob.validityStatus === 'BREAKER' && ob.type === 'BULLISH');
+  const bearBreaker = activeOrderBlocks.find(ob => ob.validityStatus === 'BREAKER' && ob.type === 'BEARISH');
+  const unmitigatedBullFVG = unmitigatedFVGs.find(f => f.type === 'BULLISH');
+  const unmitigatedBearFVG = unmitigatedFVGs.find(f => f.type === 'BEARISH');
+
+  // ── 5. STRUCTURE-DRIVEN BULLISH SETUP GENERATION ──────────────────────
+  let bullIdentified = false;
+  let bullEntryReason = '';
+  let bullEntryStructureType: TradingScenario['entryStructureType'] = 'NONE';
+  let bullEntryStructureId: string | undefined = undefined;
+  let bullEntryTop = 0;
+  let bullEntryBottom = 0;
+  let bullSourceCandleIds: number[] | undefined = undefined;
+
+  // Prioritize concrete structural zones
+  if (unmitigatedBullFVG) {
+    bullIdentified = true;
+    bullEntryStructureType = 'FVG';
+    bullEntryStructureId = unmitigatedBullFVG.id;
+    bullEntryTop = unmitigatedBullFVG.top;
+    bullEntryBottom = unmitigatedBullFVG.bottom;
+    bullEntryReason = `Unmitigated Bullish FVG [${bullEntryBottom.toFixed(decimals)} - ${bullEntryTop.toFixed(decimals)}] at displacement origin`;
+    bullSourceCandleIds = [unmitigatedBullFVG.candle1Index, unmitigatedBullFVG.candle3Index];
+  } else if (bullOB) {
+    bullIdentified = true;
+    bullEntryStructureType = 'ORDER_BLOCK';
+    bullEntryStructureId = bullOB.id;
+    bullEntryTop = bullOB.topPrice;
+    bullEntryBottom = bullOB.bottomPrice;
+    bullEntryReason = `Active Bullish Order Block [${bullEntryBottom.toFixed(decimals)} - ${bullEntryTop.toFixed(decimals)}] institutional demand zone`;
+    bullSourceCandleIds = [bullOB.originCandleIndex];
+  } else if (bullBreaker) {
+    bullIdentified = true;
+    bullEntryStructureType = 'BREAKER_BLOCK';
+    bullEntryStructureId = bullBreaker.id;
+    bullEntryTop = bullBreaker.topPrice;
+    bullEntryBottom = bullBreaker.bottomPrice;
+    bullEntryReason = `Bullish Breaker Block retest zone [${bullEntryBottom.toFixed(decimals)} - ${bullEntryTop.toFixed(decimals)}]`;
+  } else if (recentSweep && recentSweep.direction === 'SELLSIDE' && lastPrice > recentSweep.price) {
+    bullIdentified = true;
+    bullEntryStructureType = 'LIQUIDITY_SWEEP_RECLAIM';
+    bullEntryStructureId = recentSweep.id;
+    bullEntryTop = lastPrice;
+    bullEntryBottom = recentSweep.price;
+    bullEntryReason = `Sell-side liquidity sweep reclaim at ${recentSweep.price.toFixed(decimals)}`;
+  } else if (dealingRange && dealingRange.currentZone === 'DISCOUNT' && structure.swings.length > 0) {
+    const recentSwingLow = structure.swings.filter(s => s.type === 'LOW').pop();
+    if (recentSwingLow && recentSwingLow.price < lastPrice) {
+      bullIdentified = true;
+      bullEntryStructureType = 'PREMIUM_DISCOUNT_EQUILIBRIUM';
+      bullEntryTop = dealingRange.equilibrium;
+      bullEntryBottom = recentSwingLow.price;
+      bullEntryReason = `Discount dealing range demand confluence with swing low at ${recentSwingLow.price.toFixed(decimals)}`;
+    }
+  }
+
+  // Bullish Entry Level (Top of demand zone)
+  const bullEntry = bullIdentified ? bullEntryTop : 0;
+
+  // Bullish Structural SL
+  let bullSLStructureType: TradingScenario['slStructureType'] = 'SWING_LOW';
+  let bullSLStructurePrice = 0;
+  if (bullOB) {
+    bullSLStructurePrice = bullOB.bottomPrice;
+    bullSLStructureType = 'ORDER_BLOCK_INVALIDATION';
+  } else if (unmitigatedBullFVG) {
+    bullSLStructurePrice = unmitigatedBullFVG.bottom;
+    bullSLStructureType = 'FVG_INVALIDATION';
+  } else if (recentSweep && recentSweep.direction === 'SELLSIDE') {
+    bullSLStructurePrice = recentSweep.price;
+    bullSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
+  } else if (dealingRange) {
+    bullSLStructurePrice = dealingRange.rangeLow;
+    bullSLStructureType = 'DEALING_RANGE_EXTREME';
+  } else {
+    const lastLow = structure.swings.filter(s => s.type === 'LOW').pop();
+    bullSLStructurePrice = lastLow ? lastLow.price : (bullEntry - currentATR);
+  }
+
+  const bullSL = bullIdentified ? Number((bullSLStructurePrice - volatilityBuffer).toFixed(decimals)) : 0;
+  const bullSLReason = `Structural invalidation ${volatilityBuffer.toFixed(decimals)} below ${bullSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bullSLStructurePrice.toFixed(decimals)})`;
+
+  // Bullish Structural Take Profit (Opposing Liquidity)
+  let bullTP1 = 0;
+  let bullTP2 = 0;
+  let bullTPReason = '';
+  let bullTPStructureType: TradingScenario['tpStructureType'] = 'EXTERNAL_LIQUIDITY_POOL';
+  let bullTPStructureId: string | undefined = undefined;
+
+  const validBuysideTargets = liquidityPools.filter(p => p.direction === 'BUYSIDE' && p.price > (bullEntry || lastPrice)).sort((a, b) => a.price - b.price);
+  const opposingBearOB = activeOrderBlocks.find(ob => ob.type === 'BEARISH' && ob.bottomPrice > bullEntry);
+  const opposingBearFVG = unmitigatedFVGs.find(f => f.type === 'BEARISH' && f.bottom > bullEntry);
+
+  if (validBuysideTargets.length > 0) {
+    const primeTarget = validBuysideTargets[validBuysideTargets.length > 1 ? 1 : 0];
+    bullTP2 = primeTarget.price;
+    bullTP1 = validBuysideTargets[0].price;
+    bullTPStructureType = (primeTarget.type === 'EQH' || primeTarget.type === 'PDH' || primeTarget.type === 'PWH') ? 'EQUAL_HIGHS' : 'EXTERNAL_LIQUIDITY_POOL';
+    bullTPStructureId = primeTarget.id;
+    bullTPReason = `Buy-side liquidity pool resting at ${bullTP2.toFixed(decimals)} (${primeTarget.type})`;
+  } else if (opposingBearOB) {
+    bullTP2 = opposingBearOB.bottomPrice;
+    bullTP1 = (bullEntry + bullTP2) / 2;
+    bullTPStructureType = 'OPPOSING_ORDER_BLOCK';
+    bullTPStructureId = opposingBearOB.id;
+    bullTPReason = `Opposing Bearish Order Block supply barrier at ${bullTP2.toFixed(decimals)}`;
+  } else if (opposingBearFVG) {
+    bullTP2 = opposingBearFVG.bottom;
+    bullTP1 = (bullEntry + bullTP2) / 2;
+    bullTPStructureType = 'OPPOSING_FVG';
+    bullTPStructureId = opposingBearFVG.id;
+    bullTPReason = `Opposing Bearish FVG imbalance fill at ${bullTP2.toFixed(decimals)}`;
+  } else if (dealingRange && dealingRange.rangeHigh > bullEntry) {
+    bullTP2 = dealingRange.rangeHigh;
+    bullTP1 = dealingRange.equilibrium > bullEntry ? dealingRange.equilibrium : (bullEntry + bullTP2) / 2;
+    bullTPStructureType = 'DEALING_RANGE_EXPANSION';
+    bullTPReason = `Dealing range premium external high at ${bullTP2.toFixed(decimals)}`;
+  } else {
+    bullIdentified = false;
+  }
+
+  // Bullish Risk / Reward & Entry Distance Validation
+  const bullRisk = bullEntry - bullSL;
+  const bullReward = bullTP2 - bullEntry;
+  const bullRR = (bullRisk > 0 && bullReward > 0) ? Number((bullReward / bullRisk).toFixed(2)) : 0;
+  const bullEntryDist = Math.abs(lastPrice - bullEntry);
+  const bullEntryDistPercent = Number(((bullEntryDist / lastPrice) * 100).toFixed(2));
+  const bullEntryDistATR = Number((bullEntryDist / currentATR).toFixed(2));
+
+  let bullProximity: TradingScenario['entryProximityState'] = 'PENDING';
+  if (bullEntryDistATR <= 0.6 || bullEntryDistPercent <= 0.35) {
+    bullProximity = 'APPROACHING';
+  } else if (bullEntryDistATR > 2.5) {
+    bullProximity = 'TOO_FAR';
+  }
+
+  // Hard Geometry Sanity Validation
+  const isBullGeometryValid = bullIdentified && (bullSL < bullEntry) && (bullEntry < bullTP2) && (bullRR >= 1.5);
+  if (!isBullGeometryValid) {
+    bullIdentified = false;
+  }
+
+  const lastSwingLow = structure.swings.filter(s => s.type === 'LOW').pop();
+
+  const bullishScenario: TradingScenario = {
+    id: `scenario-bull-${pipeline.calculationTimestamp}`,
+    type: 'BULLISH',
+    probabilityGrade: (isBullGeometryValid && structure.currentTrend === 'BULLISH' && bullProximity !== 'TOO_FAR') ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
+    title: isBullGeometryValid ? 'Bullish Structure-Driven Long Setup' : 'Bullish Scenario (Awaiting Structural Confirmation)',
+    narrative: isBullGeometryValid
+      ? `Structural demand established at ${bullEntryReason}. SL anchored at ${bullSL.toFixed(decimals)}. Primary target draw on liquidity at ${bullTP2.toFixed(decimals)} (R:R = 1:${bullRR}).`
+      : 'No actionable bullish setup: Insufficient unmitigated demand structure or invalid risk/reward geometry.',
+    conditionsRequired: [
+      `Price must hold strictly above structural invalidation at ${bullSL.toFixed(decimals)}`,
+      `Orderly retracement into Demand Zone [${bullEntryBottom.toFixed(decimals)} - ${bullEntryTop.toFixed(decimals)}]`,
+      'Lower timeframe rejection candle confirming institutional absorption'
+    ],
+    invalidationTrigger: `Decisive candle body close below ${bullSL.toFixed(decimals)} violates bullish order flow.`,
+    invalidationPrice: Number(bullSL.toFixed(decimals)),
+    potentialTargets: [
+      { label: 'Target 1 (Internal Liquidity / Partial TP)', price: Number(bullTP1.toFixed(decimals)), description: 'Internal liquidity / 50% dealing range equilibrium', targetType: 'INTERNAL_LIQUIDITY' },
+      { label: 'Target 2 (Major Buy-Side Liquidity Pool)', price: Number(bullTP2.toFixed(decimals)), description: bullTPReason, targetType: bullTPStructureType, targetStructureId: bullTPStructureId }
+    ],
+    idealEntryZone: {
+      topPrice: Number(bullEntryTop.toFixed(decimals)),
+      bottomPrice: Number(bullEntryBottom.toFixed(decimals)),
+      referenceZone: bullEntryReason || 'Demand Invalidation Zone'
+    },
+    isStructureIdentified: isBullGeometryValid,
+    entryReason: bullEntryReason || 'No valid bullish entry structure identified',
+    entryStructureType: bullEntryStructureType,
+    entryStructureId: bullEntryStructureId,
+    entryZoneHigh: Number(bullEntryTop.toFixed(decimals)),
+    entryZoneLow: Number(bullEntryBottom.toFixed(decimals)),
+    supportingSwing: lastSwingLow ? {
+      type: 'SWING_LOW',
+      price: lastSwingLow.price,
+    } : undefined,
+    supportingLiquidity: nearestBuyside ? {
+      type: 'BUYSIDE',
+      price: nearestBuyside.price,
+      status: nearestBuyside.status,
+    } : undefined,
+    timeframe,
+    sourceCandleIds: bullSourceCandleIds,
+    slReason: bullSLReason,
+    slStructureType: bullSLStructureType,
+    slStructurePrice: Number(bullSLStructurePrice.toFixed(decimals)),
+    slBufferUsed: Number(volatilityBuffer.toFixed(decimals)),
+    tpReason: bullTPReason || 'No structural target identified',
+    tpStructureType: bullTPStructureType,
+    tpStructureId: bullTPStructureId,
+    tpDistanceFromEntry: Number(bullReward.toFixed(decimals)),
+    calculatedRR: bullRR,
+    currentPriceAtCreation: lastPrice,
+    entryDistance: Number(bullEntryDist.toFixed(decimals)),
+    entryDistancePercent: bullEntryDistPercent,
+    entryDistanceInATR: bullEntryDistATR,
+    entryProximityState: bullProximity,
+  };
+
+  // ── 6. STRUCTURE-DRIVEN BEARISH SETUP GENERATION ─────────────────────
+  let bearIdentified = false;
+  let bearEntryReason = '';
+  let bearEntryStructureType: TradingScenario['entryStructureType'] = 'NONE';
+  let bearEntryStructureId: string | undefined = undefined;
+  let bearEntryTop = 0;
+  let bearEntryBottom = 0;
+  let bearSourceCandleIds: number[] | undefined = undefined;
+
+  // Prioritize concrete structural zones
+  if (unmitigatedBearFVG) {
+    bearIdentified = true;
+    bearEntryStructureType = 'FVG';
+    bearEntryStructureId = unmitigatedBearFVG.id;
+    bearEntryTop = unmitigatedBearFVG.top;
+    bearEntryBottom = unmitigatedBearFVG.bottom;
+    bearEntryReason = `Unmitigated Bearish FVG [${bearEntryBottom.toFixed(decimals)} - ${bearEntryTop.toFixed(decimals)}] at displacement origin`;
+    bearSourceCandleIds = [unmitigatedBearFVG.candle1Index, unmitigatedBearFVG.candle3Index];
+  } else if (bearOB) {
+    bearIdentified = true;
+    bearEntryStructureType = 'ORDER_BLOCK';
+    bearEntryStructureId = bearOB.id;
+    bearEntryTop = bearOB.topPrice;
+    bearEntryBottom = bearOB.bottomPrice;
+    bearEntryReason = `Active Bearish Order Block [${bearEntryBottom.toFixed(decimals)} - ${bearEntryTop.toFixed(decimals)}] institutional supply zone`;
+    bearSourceCandleIds = [bearOB.originCandleIndex];
+  } else if (bearBreaker) {
+    bearIdentified = true;
+    bearEntryStructureType = 'BREAKER_BLOCK';
+    bearEntryStructureId = bearBreaker.id;
+    bearEntryTop = bearBreaker.topPrice;
+    bearEntryBottom = bearBreaker.bottomPrice;
+    bearEntryReason = `Bearish Breaker Block retest zone [${bearEntryBottom.toFixed(decimals)} - ${bearEntryTop.toFixed(decimals)}]`;
+  } else if (recentSweep && recentSweep.direction === 'BUYSIDE' && lastPrice < recentSweep.price) {
+    bearIdentified = true;
+    bearEntryStructureType = 'LIQUIDITY_SWEEP_RECLAIM';
+    bearEntryStructureId = recentSweep.id;
+    bearEntryTop = recentSweep.price;
+    bearEntryBottom = lastPrice;
+    bearEntryReason = `Buy-side liquidity sweep rejection at ${recentSweep.price.toFixed(decimals)}`;
+  } else if (dealingRange && dealingRange.currentZone === 'PREMIUM' && structure.swings.length > 0) {
+    const recentSwingHigh = structure.swings.filter(s => s.type === 'HIGH').pop();
+    if (recentSwingHigh && recentSwingHigh.price > lastPrice) {
+      bearIdentified = true;
+      bearEntryStructureType = 'PREMIUM_DISCOUNT_EQUILIBRIUM';
+      bearEntryTop = recentSwingHigh.price;
+      bearEntryBottom = dealingRange.equilibrium;
+      bearEntryReason = `Premium dealing range supply confluence with swing high at ${recentSwingHigh.price.toFixed(decimals)}`;
+    }
+  }
+
+  // Bearish Entry Level (Bottom of supply zone)
+  const bearEntry = bearIdentified ? bearEntryBottom : 0;
+
+  // Bearish Structural SL
+  let bearSLStructureType: TradingScenario['slStructureType'] = 'SWING_HIGH';
+  let bearSLStructurePrice = 0;
+  if (bearOB) {
+    bearSLStructurePrice = bearOB.topPrice;
+    bearSLStructureType = 'ORDER_BLOCK_INVALIDATION';
+  } else if (unmitigatedBearFVG) {
+    bearSLStructurePrice = unmitigatedBearFVG.top;
+    bearSLStructureType = 'FVG_INVALIDATION';
+  } else if (recentSweep && recentSweep.direction === 'BUYSIDE') {
+    bearSLStructurePrice = recentSweep.price;
+    bearSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
+  } else if (dealingRange) {
+    bearSLStructurePrice = dealingRange.rangeHigh;
+    bearSLStructureType = 'DEALING_RANGE_EXTREME';
+  } else {
+    const lastHigh = structure.swings.filter(s => s.type === 'HIGH').pop();
+    bearSLStructurePrice = lastHigh ? lastHigh.price : (bearEntry + currentATR);
+  }
+
+  const bearSL = bearIdentified ? Number((bearSLStructurePrice + volatilityBuffer).toFixed(decimals)) : 0;
+  const bearSLReason = `Structural invalidation ${volatilityBuffer.toFixed(decimals)} above ${bearSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bearSLStructurePrice.toFixed(decimals)})`;
+
+  // Bearish Structural Take Profit (Opposing Liquidity)
+  let bearTP1 = 0;
+  let bearTP2 = 0;
+  let bearTPReason = '';
+  let bearTPStructureType: TradingScenario['tpStructureType'] = 'EXTERNAL_LIQUIDITY_POOL';
+  let bearTPStructureId: string | undefined = undefined;
+
+  const validSellsideTargets = liquidityPools.filter(p => p.direction === 'SELLSIDE' && p.price < (bearEntry || lastPrice)).sort((a, b) => b.price - a.price);
+  const opposingBullOB = activeOrderBlocks.find(ob => ob.type === 'BULLISH' && ob.topPrice < bearEntry);
+  const opposingBullFVG = unmitigatedFVGs.find(f => f.type === 'BULLISH' && f.top < bearEntry);
+
+  if (validSellsideTargets.length > 0) {
+    const primeTarget = validSellsideTargets[validSellsideTargets.length > 1 ? 1 : 0];
+    bearTP2 = primeTarget.price;
+    bearTP1 = validSellsideTargets[0].price;
+    bearTPStructureType = (primeTarget.type === 'EQL' || primeTarget.type === 'PDL' || primeTarget.type === 'PWL') ? 'EQUAL_LOWS' : 'EXTERNAL_LIQUIDITY_POOL';
+    bearTPStructureId = primeTarget.id;
+    bearTPReason = `Sell-side liquidity pool resting at ${bearTP2.toFixed(decimals)} (${primeTarget.type})`;
+  } else if (opposingBullOB) {
+    bearTP2 = opposingBullOB.topPrice;
+    bearTP1 = (bearEntry + bearTP2) / 2;
+    bearTPStructureType = 'OPPOSING_ORDER_BLOCK';
+    bearTPStructureId = opposingBullOB.id;
+    bearTPReason = `Opposing Bullish Order Block demand barrier at ${bearTP2.toFixed(decimals)}`;
+  } else if (opposingBullFVG) {
+    bearTP2 = opposingBullFVG.top;
+    bearTP1 = (bearEntry + bearTP2) / 2;
+    bearTPStructureType = 'OPPOSING_FVG';
+    bearTPStructureId = opposingBullFVG.id;
+    bearTPReason = `Opposing Bullish FVG imbalance fill at ${bearTP2.toFixed(decimals)}`;
+  } else if (dealingRange && dealingRange.rangeLow < bearEntry) {
+    bearTP2 = dealingRange.rangeLow;
+    bearTP1 = dealingRange.equilibrium < bearEntry ? dealingRange.equilibrium : (bearEntry + bearTP2) / 2;
+    bearTPStructureType = 'DEALING_RANGE_EXPANSION';
+    bearTPReason = `Dealing range discount external low at ${bearTP2.toFixed(decimals)}`;
+  } else {
+    bearIdentified = false;
+  }
+
+  // Bearish Risk / Reward & Entry Distance Validation
+  const bearRisk = bearSL - bearEntry;
+  const bearReward = bearEntry - bearTP2;
+  const bearRR = (bearRisk > 0 && bearReward > 0) ? Number((bearReward / bearRisk).toFixed(2)) : 0;
+  const bearEntryDist = Math.abs(lastPrice - bearEntry);
+  const bearEntryDistPercent = Number(((bearEntryDist / lastPrice) * 100).toFixed(2));
+  const bearEntryDistATR = Number((bearEntryDist / currentATR).toFixed(2));
+
+  let bearProximity: TradingScenario['entryProximityState'] = 'PENDING';
+  if (bearEntryDistATR <= 0.6 || bearEntryDistPercent <= 0.35) {
+    bearProximity = 'APPROACHING';
+  } else if (bearEntryDistATR > 2.5) {
+    bearProximity = 'TOO_FAR';
+  }
+
+  // Hard Geometry Sanity Validation
+  const isBearGeometryValid = bearIdentified && (bearTP2 < bearEntry) && (bearEntry < bearSL) && (bearRR >= 1.5);
+  if (!isBearGeometryValid) {
+    bearIdentified = false;
+  }
+
+  const lastSwingHigh = structure.swings.filter(s => s.type === 'HIGH').pop();
+
+  const bearishScenario: TradingScenario = {
+    id: `scenario-bear-${pipeline.calculationTimestamp}`,
+    type: 'BEARISH',
+    probabilityGrade: (isBearGeometryValid && structure.currentTrend === 'BEARISH' && bearProximity !== 'TOO_FAR') ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
+    title: isBearGeometryValid ? 'Bearish Structure-Driven Short Setup' : 'Bearish Scenario (Awaiting Structural Confirmation)',
+    narrative: isBearGeometryValid
+      ? `Structural supply established at ${bearEntryReason}. SL anchored at ${bearSL.toFixed(decimals)}. Primary target draw on liquidity at ${bearTP2.toFixed(decimals)} (R:R = 1:${bearRR}).`
+      : 'No actionable bearish setup: Insufficient unmitigated supply structure or invalid risk/reward geometry.',
+    conditionsRequired: [
+      `Price must hold strictly below structural invalidation at ${bearSL.toFixed(decimals)}`,
+      `Orderly retracement into Supply Zone [${bearEntryBottom.toFixed(decimals)} - ${bearEntryTop.toFixed(decimals)}]`,
+      'Bearish Market Structure Shift (MSS) or rejection candle confirming supply emergence'
+    ],
+    invalidationTrigger: `Decisive candle body close above ${bearSL.toFixed(decimals)} violates bearish order flow.`,
+    invalidationPrice: Number(bearSL.toFixed(decimals)),
+    potentialTargets: [
+      { label: 'Target 1 (Internal Liquidity / Partial TP)', price: Number(bearTP1.toFixed(decimals)), description: 'Internal liquidity / 50% dealing range equilibrium', targetType: 'INTERNAL_LIQUIDITY' },
+      { label: 'Target 2 (Major Sell-Side Liquidity Pool)', price: Number(bearTP2.toFixed(decimals)), description: bearTPReason, targetType: bearTPStructureType, targetStructureId: bearTPStructureId }
+    ],
+    idealEntryZone: {
+      topPrice: Number(bearEntryTop.toFixed(decimals)),
+      bottomPrice: Number(bearEntryBottom.toFixed(decimals)),
+      referenceZone: bearEntryReason || 'Supply Invalidation Zone'
+    },
+    isStructureIdentified: isBearGeometryValid,
+    entryReason: bearEntryReason || 'No valid bearish entry structure identified',
+    entryStructureType: bearEntryStructureType,
+    entryStructureId: bearEntryStructureId,
+    entryZoneHigh: Number(bearEntryTop.toFixed(decimals)),
+    entryZoneLow: Number(bearEntryBottom.toFixed(decimals)),
+    supportingSwing: lastSwingHigh ? {
+      type: 'SWING_HIGH',
+      price: lastSwingHigh.price,
+    } : undefined,
+    supportingLiquidity: nearestSellside ? {
+      type: 'SELLSIDE',
+      price: nearestSellside.price,
+      status: nearestSellside.status,
+    } : undefined,
+    timeframe,
+    sourceCandleIds: bearSourceCandleIds,
+    slReason: bearSLReason,
+    slStructureType: bearSLStructureType,
+    slStructurePrice: Number(bearSLStructurePrice.toFixed(decimals)),
+    slBufferUsed: Number(volatilityBuffer.toFixed(decimals)),
+    tpReason: bearTPReason || 'No structural target identified',
+    tpStructureType: bearTPStructureType,
+    tpStructureId: bearTPStructureId,
+    tpDistanceFromEntry: Number(bearReward.toFixed(decimals)),
+    calculatedRR: bearRR,
+    currentPriceAtCreation: lastPrice,
+    entryDistance: Number(bearEntryDist.toFixed(decimals)),
+    entryDistancePercent: bearEntryDistPercent,
+    entryDistanceInATR: bearEntryDistATR,
+    entryProximityState: bearProximity,
+  };
+
+  // ── 7. Evidence-Based Setup Quality Score Calculation ────────────────
   const bulletPoints: string[] = [];
   const conflictingSignals: string[] = [];
 
-  // HTF Bias Evidence
   bulletPoints.push(`${htfBias} higher-timeframe market structure context`);
+  if (structure.lastBOS) bulletPoints.push(`Confirmed BOS in ${structure.lastBOS.direction.toLowerCase()} direction at ${structure.lastBOS.breakPrice.toFixed(decimals)}`);
+  if (structure.lastMSS) bulletPoints.push(`Confirmed Market Structure Shift (MSS) at ${structure.lastMSS.breakPrice.toFixed(decimals)}`);
+  if (recentSweep) bulletPoints.push(`Recent ${recentSweep.direction.toLowerCase()} liquidity sweep at ${recentSweep.price.toFixed(decimals)} (${recentSweep.status})`);
+  if (unmitigatedBullFVG) bulletPoints.push(`Active unmitigated Bullish FVG [${unmitigatedBullFVG.bottom.toFixed(decimals)} - ${unmitigatedBullFVG.top.toFixed(decimals)}]`);
+  if (unmitigatedBearFVG) bulletPoints.push(`Active unmitigated Bearish FVG [${unmitigatedBearFVG.bottom.toFixed(decimals)} - ${unmitigatedBearFVG.top.toFixed(decimals)}]`);
+  if (dealingRange) bulletPoints.push(`Price is situated in ${dealingRange.currentZone} zone of dealing range [${dealingRange.rangeLow.toFixed(decimals)} - ${dealingRange.rangeHigh.toFixed(decimals)}]`);
 
-  // BOS / CHoCH Evidence
-  if (structure.lastBOS) {
-    bulletPoints.push(`Latest BOS detected in ${structure.lastBOS.direction.toLowerCase()} direction at ${structure.lastBOS.breakPrice.toFixed(4)}`);
-  }
-  if (structure.lastMSS) {
-    bulletPoints.push(`Market Structure Shift (MSS) confirmed with aggressive displacement at ${structure.lastMSS.breakPrice.toFixed(4)}`);
-  }
-  if (structure.lastCHoCH) {
-    bulletPoints.push(`Change of Character (CHoCH) observed at ${structure.lastCHoCH.breakPrice.toFixed(4)}`);
-  }
-
-  // Sweeps Evidence
-  const recentSweep = sweptLiquidity[sweptLiquidity.length - 1];
-  if (recentSweep) {
-    bulletPoints.push(`Recent ${recentSweep.direction.toLowerCase()} liquidity sweep at ${recentSweep.price.toFixed(4)} (${recentSweep.status})`);
-  }
-
-  // FVG & OB Evidence
-  const unmitigatedBullFVG = unmitigatedFVGs.find(f => f.type === 'BULLISH');
-  const unmitigatedBearFVG = unmitigatedFVGs.find(f => f.type === 'BEARISH');
-  if (unmitigatedBullFVG) {
-    bulletPoints.push(`Active unmitigated Bullish FVG [${unmitigatedBullFVG.bottom.toFixed(4)} - ${unmitigatedBullFVG.top.toFixed(4)}]`);
-  }
-  if (unmitigatedBearFVG) {
-    bulletPoints.push(`Active unmitigated Bearish FVG [${unmitigatedBearFVG.bottom.toFixed(4)} - ${unmitigatedBearFVG.top.toFixed(4)}]`);
-  }
-
-  // Dealing Range
-  if (dealingRange) {
-    bulletPoints.push(`Price is currently situated in the ${dealingRange.currentZone} zone of dealing range [${dealingRange.rangeLow.toFixed(4)} - ${dealingRange.rangeHigh.toFixed(4)}]`);
-  }
-
-  // Detect Conflicting Signals
   if (htfBias === 'BULLISH' && structure.currentTrend === 'BEARISH') {
-    conflictingSignals.push('HTF Macro Trend is Bullish while local structure is currently printing Lower Lows (Counter-trend pullback phase).');
+    conflictingSignals.push('HTF Macro Trend is Bullish while local structure is currently printing Lower Lows (Counter-trend retracement).');
   }
   if (htfBias === 'BEARISH' && structure.currentTrend === 'BULLISH') {
     conflictingSignals.push('HTF Macro Trend is Bearish while local structure is printing Higher Highs (Potential deep retracement or trend reversal).');
   }
   if (dealingRange?.currentZone === 'PREMIUM' && structure.currentTrend === 'BULLISH') {
-    conflictingSignals.push('Price is in Premium zone: Long entries carry higher risk without deep retracement to discount or FVG.');
+    conflictingSignals.push('Price is in Premium zone: Long entries carry higher risk without deep retracement to discount demand.');
+  }
+  if (dealingRange?.currentZone === 'DISCOUNT' && structure.currentTrend === 'BEARISH') {
+    conflictingSignals.push('Price is in Discount zone: Short entries carry higher risk without retracement to premium supply.');
   }
 
-  // 5. Evidence-Based Setup Quality Score Calculation
+  const isSetupActive = isBullGeometryValid || isBearGeometryValid;
+
   const scoreComponents: SetupScoreComponent[] = [
     {
       category: 'HTF Trend Alignment',
       score: htfBias === structure.currentTrend ? 9 : 4,
       maxScore: 10,
       weight: 0.20,
-      reason: htfBias === structure.currentTrend ? 'Strong confluence between HTF bias and intermediate structure' : 'Intermediate structure is in counter-trend retracement',
+      reason: htfBias === structure.currentTrend ? 'Strong confluence between HTF bias and execution timeframe' : 'Execution timeframe is in counter-trend retracement',
       isPositive: htfBias === structure.currentTrend
     },
     {
       category: 'Market Structure Confirmation',
-      score: structure.lastMSS ? 9 : structure.lastBOS ? 8 : 5,
+      score: structure.lastMSS ? 10 : structure.lastBOS ? 8 : 4,
       maxScore: 10,
       weight: 0.20,
-      reason: structure.lastMSS ? 'Confirmed Market Structure Shift (MSS) with impulsive candle close' : structure.lastBOS ? 'Confirmed Break of Structure (BOS)' : 'No recent clean structural break confirmed',
+      reason: structure.lastMSS ? 'Confirmed Market Structure Shift (MSS) with displacement close' : structure.lastBOS ? 'Confirmed Break of Structure (BOS)' : 'No recent structural break confirmed',
       isPositive: !!(structure.lastMSS || structure.lastBOS)
+    },
+    {
+      category: 'Institutional Structure & Zones',
+      score: isSetupActive ? 9 : 3,
+      maxScore: 10,
+      weight: 0.20,
+      reason: isSetupActive ? 'Legitimate institutional FVG or Order Block identified with structural invalidation' : 'No clean unmitigated FVG or Order Block identified',
+      isPositive: isSetupActive
     },
     {
       category: 'Liquidity Sweep State',
@@ -104,18 +499,10 @@ export function generateStructuredSMCAnalysis(
       isPositive: !!recentSweep
     },
     {
-      category: 'Institutional Imbalance (FVG / OB)',
-      score: (unmitigatedBullFVG || unmitigatedBearFVG) && activeOrderBlocks.length > 0 ? 9 : 6,
-      maxScore: 10,
-      weight: 0.15,
-      reason: 'Valid unmitigated Fair Value Gap aligned with active Order Block origin',
-      isPositive: true
-    },
-    {
       category: 'Session Confluence',
       score: sessionStatus.activeOverlap ? 10 : sessionStatus.currentSessions.some(s => s.isActive) ? 8 : 5,
       maxScore: 10,
-      weight: 0.15,
+      weight: 0.10,
       reason: sessionStatus.activeOverlap ? 'High institutional volume during London/NY Overlap' : 'Active major trading session',
       isPositive: sessionStatus.currentSessions.some(s => s.isActive)
     },
@@ -124,15 +511,16 @@ export function generateStructuredSMCAnalysis(
       score: news.hasImminentHighImpactEvent ? 2 : 9,
       maxScore: 10,
       weight: 0.15,
-      reason: news.hasImminentHighImpactEvent ? 'High-impact scheduled event imminent (spread/volatility risk)' : 'No imminent high-impact macro disruptions in the next 60m',
+      reason: news.hasImminentHighImpactEvent ? 'High-impact scheduled event imminent (spread/volatility risk)' : 'No imminent high-impact macro disruptions in next 60m',
       isPositive: !news.hasImminentHighImpactEvent
     }
   ];
 
-  const totalWeightedScore = Math.round(
+  const rawWeightedScore = Math.round(
     scoreComponents.reduce((acc, c) => acc + (c.score / c.maxScore) * c.weight * 100, 0)
   );
 
+  const totalWeightedScore = isSetupActive ? rawWeightedScore : Math.min(55, rawWeightedScore);
   const grade = totalWeightedScore >= 85 ? 'A+' : totalWeightedScore >= 75 ? 'A' : totalWeightedScore >= 60 ? 'B' : 'C';
 
   const setupQuality: SetupQualityScore = {
@@ -140,90 +528,6 @@ export function generateStructuredSMCAnalysis(
     grade,
     components: scoreComponents,
     summary: `Setup Quality Grade: ${grade} (${totalWeightedScore}/100). ${scoreComponents.filter(c => !c.isPositive).map(c => c.reason).join('. ')}`
-  };
-
-  // 6. Bullish & Bearish Probabilistic Scenarios with Strict Directional Geometry
-  const bullOB = activeOrderBlocks.find(ob => ob.type === 'BULLISH');
-  const bearOB = activeOrderBlocks.find(ob => ob.type === 'BEARISH');
-
-  const isForex = instrument.assetClass === 'forex';
-  const decimals = isForex ? 5 : 2;
-  const bufferPips = instrument.pipSize > 0 ? instrument.pipSize * 5 : lastPrice * 0.001;
-
-  // ── Bullish Scenario Geometry (SL < Entry < TP, RR >= 2.0R) ─────────
-  const rawBullEntryTop = unmitigatedBullFVG?.top || bullOB?.topPrice || lastPrice * 0.998;
-  const rawBullEntryBottom = unmitigatedBullFVG?.bottom || bullOB?.bottomPrice || (rawBullEntryTop - bufferPips);
-  const bullEntry = rawBullEntryTop;
-
-  const rawBullSL = unmitigatedBullFVG?.bottom || bullOB?.bottomPrice || dealingRange?.rangeLow || (bullEntry - bufferPips * 3);
-  const bullSL = Math.min(rawBullSL, bullEntry - bufferPips);
-  const bullRisk = Math.max(bufferPips, bullEntry - bullSL);
-
-  const minBullTarget = bullEntry + bullRisk * 2.0;
-  const rawBullTarget = nearestBuyside && nearestBuyside.price > bullEntry ? nearestBuyside.price : minBullTarget;
-  const targetBuysidePrice = Math.max(rawBullTarget, minBullTarget);
-  const bullTarget1 = (bullEntry + targetBuysidePrice) / 2;
-
-  const bullishScenario: TradingScenario = {
-    id: `scenario-bull-${pipeline.calculationTimestamp}`,
-    type: 'BULLISH',
-    probabilityGrade: structure.currentTrend === 'BULLISH' ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
-    title: 'Bullish Continuation / Retracement Long Setup',
-    narrative: `Evidence favors a bullish expansion toward buy-side liquidity (${targetBuysidePrice.toFixed(decimals)}) if price respects the discount dealing range and unmitigated institutional demand.`,
-    conditionsRequired: [
-      `Price must hold above the key swing low at ${bullSL.toFixed(decimals)}`,
-      `Retracement into Bullish Demand Zone [${rawBullEntryBottom.toFixed(decimals)} - ${rawBullEntryTop.toFixed(decimals)}]`,
-      'Lower timeframe rejection candle confirming demand absorption'
-    ],
-    invalidationTrigger: `Decisive candle close below ${bullSL.toFixed(decimals)} invalidates the bullish thesis and suggests structural shift to bearish.`,
-    invalidationPrice: Number(bullSL.toFixed(decimals)),
-    potentialTargets: [
-      { label: 'Target 1 (Internal Liquidity)', price: Number(bullTarget1.toFixed(decimals)), description: '50% Dealing range equilibrium / intermediate swing high' },
-      { label: 'Target 2 (Major Buy-Side Liquidity)', price: Number(targetBuysidePrice.toFixed(decimals)), description: 'Major Equal Highs / Previous Day High liquidity pool' }
-    ],
-    idealEntryZone: {
-      topPrice: Number(rawBullEntryTop.toFixed(decimals)),
-      bottomPrice: Number(rawBullEntryBottom.toFixed(decimals)),
-      referenceZone: 'Unmitigated Bullish FVG + Order Block Discount Zone'
-    }
-  };
-
-  // ── Bearish Scenario Geometry (TP < Entry < SL, RR >= 2.0R) ────────
-  const rawBearEntryTop = unmitigatedBearFVG?.top || bearOB?.topPrice || (lastPrice * 1.002 + bufferPips);
-  const rawBearEntryBottom = unmitigatedBearFVG?.bottom || bearOB?.bottomPrice || lastPrice * 1.002;
-  const bearEntry = rawBearEntryBottom;
-
-  const rawBearSL = unmitigatedBearFVG?.top || bearOB?.topPrice || dealingRange?.rangeHigh || (bearEntry + bufferPips * 3);
-  const bearSL = Math.max(rawBearSL, bearEntry + bufferPips);
-  const bearRisk = Math.max(bufferPips, bearSL - bearEntry);
-
-  const minBearTarget = bearEntry - bearRisk * 2.0;
-  const rawBearTarget = nearestSellside && nearestSellside.price < bearEntry ? nearestSellside.price : minBearTarget;
-  const targetSellsidePrice = Math.min(rawBearTarget, minBearTarget);
-  const bearTarget1 = (bearEntry + targetSellsidePrice) / 2;
-
-  const bearishScenario: TradingScenario = {
-    id: `scenario-bear-${pipeline.calculationTimestamp}`,
-    type: 'BEARISH',
-    probabilityGrade: structure.currentTrend === 'BEARISH' ? 'HIGH_PROBABILITY' : 'CONDITIONAL',
-    title: 'Bearish Continuation / Liquidity Sweep Short Setup',
-    narrative: `Evidence favors a bearish decline toward sell-side liquidity (${targetSellsidePrice.toFixed(decimals)}) if price rejects the premium dealing range or confirms a liquidity grab above highs.`,
-    conditionsRequired: [
-      `Price must remain capped below the key swing high at ${bearSL.toFixed(decimals)}`,
-      `Rejection from Bearish Supply Zone [${rawBearEntryBottom.toFixed(decimals)} - ${rawBearEntryTop.toFixed(decimals)}]`,
-      'Bearish Market Structure Shift (MSS) on execution timeframe'
-    ],
-    invalidationTrigger: `Decisive candle close above ${bearSL.toFixed(decimals)} violates bearish order flow and voids the short scenario.`,
-    invalidationPrice: Number(bearSL.toFixed(decimals)),
-    potentialTargets: [
-      { label: 'Target 1 (Internal SSL)', price: Number(bearTarget1.toFixed(decimals)), description: 'Intermediate swing low sell-side liquidity' },
-      { label: 'Target 2 (Major Sell-Side Liquidity)', price: Number(targetSellsidePrice.toFixed(decimals)), description: 'Major Equal Lows / Previous Day Low pool' }
-    ],
-    idealEntryZone: {
-      topPrice: Number(rawBearEntryTop.toFixed(decimals)),
-      bottomPrice: Number(rawBearEntryBottom.toFixed(decimals)),
-      referenceZone: 'Unmitigated Bearish FVG + Premium Supply Zone'
-    }
   };
 
   return {
@@ -243,7 +547,7 @@ export function generateStructuredSMCAnalysis(
       htfBias,
       intermediateStructure,
       lowerTimeframeStatus: structure.lastMSS ? 'MSS in progress' : 'Consolidating in dealing range',
-      summary: `Market condition is currently ${structure.currentTrend.toLowerCase()} on the ${timeframe} timeframe. HTF context is ${htfBias.toLowerCase()}. Price is trading at ${lastPrice.toFixed(4)} within the ${dealingRange?.currentZone || 'active'} dealing range.`
+      summary: `Market condition is currently ${structure.currentTrend.toLowerCase()} on the ${timeframe} timeframe. HTF context is ${htfBias.toLowerCase()}. Price is trading at ${lastPrice.toFixed(decimals)} within the ${dealingRange?.currentZone || 'active'} dealing range.`
     },
     structuralEvidence: {
       bulletPoints,
@@ -254,7 +558,7 @@ export function generateStructuredSMCAnalysis(
       nearestSellside,
       majorLiquidityPools: liquidityPools,
       sweptLiquidity,
-      nextTargetSummary: `Primary draw on liquidity is resting at ${structure.currentTrend === 'BULLISH' ? targetBuysidePrice.toFixed(4) + ' (Buy-side)' : targetSellsidePrice.toFixed(4) + ' (Sell-side)'}.`
+      nextTargetSummary: `Primary draw on liquidity is resting at ${structure.currentTrend === 'BULLISH' ? (bullTP2 > 0 ? bullTP2.toFixed(decimals) + ' (Buy-side)' : 'None') : (bearTP2 > 0 ? bearTP2.toFixed(decimals) + ' (Sell-side)' : 'None')}.`
     },
     relevantZones: {
       activeOrderBlocks,
@@ -278,8 +582,8 @@ export function generateStructuredSMCAnalysis(
     educationalNotes: [
       {
         concept: 'Market Structure & Swings',
-        explanation: 'SMC relies on sequence of Higher Highs / Higher Lows (bullish) and Lower Highs / Lower Lows (bearish). Structural breaks are confirmed strictly by candle body closes beyond swing extremes.',
-        chartApplication: `On this chart, the last confirmed swing high is at ${(dealingRange?.rangeHigh || 0).toFixed(4)} and swing low is at ${(dealingRange?.rangeLow || 0).toFixed(4)}.`
+        explanation: 'SMC relies on sequences of Higher Highs / Higher Lows (bullish) and Lower Highs / Lower Lows (bearish). Structural breaks are confirmed strictly by candle body closes beyond swing extremes.',
+        chartApplication: `On this chart, the last confirmed swing high is at ${(dealingRange?.rangeHigh || 0).toFixed(decimals)} and swing low is at ${(dealingRange?.rangeLow || 0).toFixed(decimals)}.`
       },
       {
         concept: 'Fair Value Gap (FVG)',

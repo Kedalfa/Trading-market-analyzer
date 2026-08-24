@@ -17,6 +17,8 @@ import { generateStructuredSMCAnalysis } from './aiReasoningService';
 import { telegramAlertDispatcher } from './telegramAlertDispatcher';
 import { Instrument } from '../types/market';
 import { validateTradeSetup, ACTIVE_SUPPORTED_INSTRUMENTS } from './tradeSetupValidator';
+import { executeExnessTrade } from './exnessExecutionService';
+import { config } from '../config/config';
 
 export interface ScannerHealthStatus {
   isScannerRunning: boolean;
@@ -97,16 +99,22 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
   const isBull = structAnalysis.marketOverview.htfBias === 'BULLISH';
   const scenario = isBull ? structAnalysis.scenarios.bullish : structAnalysis.scenarios.bearish;
 
-  // Strict Confluence Gate: Score >= 75 (Grade A or A+) and High Probability
-  if (quality.totalScore >= 75 && scenario.probabilityGrade === 'HIGH_PROBABILITY') {
-    const entryTop = scenario.idealEntryZone.topPrice;
-    const entryBottom = scenario.idealEntryZone.bottomPrice;
+  // Strict Confluence Gate: Legitimate SMC structure required, Grade >= 75, High Probability, Not TOO_FAR
+  if (
+    scenario.isStructureIdentified &&
+    scenario.entryProximityState !== 'TOO_FAR' &&
+    quality.totalScore >= 75 &&
+    scenario.probabilityGrade === 'HIGH_PROBABILITY'
+  ) {
+    const entry = isBull ? scenario.entryZoneHigh : scenario.entryZoneLow;
     const stopLoss = scenario.invalidationPrice;
-    const target1 = scenario.potentialTargets[0]?.price || (isBull ? entryTop * 1.01 : entryBottom * 0.99);
-    const target2 = scenario.potentialTargets[1]?.price || (isBull ? entryTop * 1.02 : entryBottom * 0.98);
-    const target3 = scenario.potentialTargets[2]?.price;
+    const target2 = scenario.potentialTargets[1]?.price || scenario.potentialTargets[0]?.price;
 
-    const entry = isBull ? entryTop : entryBottom;
+    if (!target2 || target2 <= 0 || (isBull ? target2 <= entry : target2 >= entry)) {
+      console.warn(`[MarketScanner] Setup rejected for ${instObj.symbol}: Invalid target structure (${target2}).`);
+      return;
+    }
+
     const validation = validateTradeSetup({
       instrumentId,
       symbol: instObj.symbol,
@@ -193,15 +201,79 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
     const setupIndex = String(countToday + 1).padStart(2, '0');
     const setupId = `SMC-${instObj.symbol.replace('/', '')}-${dateStr}-${setupIndex}`;
 
-    // 1. Proactively dispatch formatted Telegram alerts to subscribers
+    // 1. Persist to MongoDB Analysis Collection (idempotent upsert — safe across concurrent cycles)
+    try {
+      const scanDoc = {
+        analysisId: setupId,
+        symbol: instObj.symbol,
+        instrumentId,
+        timeframe,
+        htfTimeframe: '4H',
+        currentPrice: pipe.lastPrice,
+        direction: isBull ? 'BULLISH' : 'BEARISH',
+        entryPrice: Number(entry.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+        stopLossPrice: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+        targetPrice: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+        invalidationPrice: Number(scenario.invalidationPrice.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+        riskRewardRatio: rr,
+        rulesetUsed: 'standard_smc',
+        htfBias: structAnalysis.marketOverview.htfBias,
+        intermediateStructure: structAnalysis.marketOverview.intermediateStructure,
+        structuralEvidence: structAnalysis.structuralEvidence.bulletPoints,
+        conflictingSignals: structAnalysis.structuralEvidence.conflictingSignals,
+        bullishScenario: structAnalysis.scenarios.bullish,
+        bearishScenario: structAnalysis.scenarios.bearish,
+        setupQuality: structAnalysis.setupQuality,
+        newsRiskWarning: structAnalysis.newsContext.riskWarning,
+        sessionNotes: structAnalysis.sessionContext.sessionNotes ?? '',
+        savedAt: new Date(),
+        outcome: {
+          status: 'OPEN',
+          monitoringStatus: 'Proactive Alert Dispatched — Actively Monitoring Live Feeds',
+          auditTrail: [
+            {
+              previousStatus: 'NEW',
+              newStatus: 'OPEN',
+              timestamp: new Date(),
+              triggerReason: 'Scanner detected new Grade A SMC confluence setup & pushed Telegram alert',
+              observedPrice: pipe.lastPrice,
+            },
+          ],
+        },
+      };
+
+      const result = await Analysis.findOneAndUpdate(
+        { analysisId: setupId },
+        { $setOnInsert: scanDoc },
+        { upsert: true, new: false, runValidators: true }
+      );
+
+      if (result !== null) {
+        // Record already existed — scanner cycle overlap, skip counting & alerts
+        console.log(`[MarketScanner] Setup ${setupId} already persisted by concurrent cycle — skipped.`);
+        return;
+      }
+    } catch (dbErr: any) {
+      if (dbErr?.code === 11000) {
+        // MongoDB duplicate key — harmless: another cycle already inserted this setup
+        console.log(`[MarketScanner] Duplicate key for ${setupId} (concurrent write) — skipped.`);
+        return;
+      }
+      throw dbErr;
+    }
+
+    // 2. Dispatch formatted Telegram alert only AFTER successful authoritative persistence
+    const target1 = scenario.potentialTargets[0]?.price || target2;
+    const target3 = scenario.potentialTargets[2]?.price;
+
     await telegramAlertDispatcher.dispatchNewSetupAlert({
       setupId,
       symbol: instObj.symbol,
       analysis: structAnalysis,
       pipeline: pipe,
       direction: isBull ? 'BULLISH' : 'BEARISH',
-      entryTop,
-      entryBottom,
+      entryTop: scenario.entryZoneHigh,
+      entryBottom: scenario.entryZoneLow,
       stopLoss,
       target1,
       target2,
@@ -210,48 +282,29 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
       riskReward: rr,
     });
 
-    // 2. Persist to MongoDB Analysis Collection for unified outcome tracking
-    await Analysis.create({
-      analysisId: setupId,
-      symbol: instObj.symbol,
-      instrumentId,
-      timeframe,
-      htfTimeframe: '4H',
-      currentPrice: pipe.lastPrice,
-      direction: isBull ? 'BULLISH' : 'BEARISH',
-      entryPrice: Number(entryTop.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-      stopLossPrice: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-      targetPrice: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-      invalidationPrice: Number(scenario.invalidationPrice.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-      riskRewardRatio: rr,
-      rulesetUsed: 'standard_smc',
-      htfBias: structAnalysis.marketOverview.htfBias,
-      intermediateStructure: structAnalysis.marketOverview.intermediateStructure,
-      structuralEvidence: structAnalysis.structuralEvidence.bulletPoints,
-      conflictingSignals: structAnalysis.structuralEvidence.conflictingSignals,
-      bullishScenario: structAnalysis.scenarios.bullish,
-      bearishScenario: structAnalysis.scenarios.bearish,
-      setupQuality: structAnalysis.setupQuality,
-      newsRiskWarning: structAnalysis.newsContext.riskWarning,
-      sessionNotes: structAnalysis.sessionContext.sessionNotes ?? '',
-      savedAt: new Date(),
-      outcome: {
-        status: 'OPEN',
-        monitoringStatus: 'Proactive Alert Dispatched — Actively Monitoring Live Feeds',
-        auditTrail: [
-          {
-            previousStatus: 'NEW',
-            newStatus: 'OPEN',
-            timestamp: new Date(),
-            triggerReason: 'Scanner detected new Grade A SMC confluence setup & pushed Telegram alert',
-            observedPrice: pipe.lastPrice,
-          },
-        ],
-      },
-    });
+    // 3. Exness Automated Trade Placement (if auto-execute enabled)
+    if (config.exness.enabled && config.exness.autoExecute) {
+      try {
+        console.log(`[MarketScanner] ⚡ Exness auto-execute triggered for ${setupId} on ${instObj.symbol}`);
+        const execResult = await executeExnessTrade({
+          analysisId: setupId,
+          instrumentId,
+          direction: isBull ? 'BULLISH' : 'BEARISH',
+          entryPrice: Number(entry.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+          stopLoss: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+          takeProfit1: Number(target1.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+          takeProfit2: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+          riskPercent: config.exness.maxRiskPercent,
+          comment: `SMC-${setupId.slice(-8)}`,
+        });
+        console.log(`[MarketScanner] Exness execution status: ${execResult.status} | Ticket: ${execResult.ticket || execResult.orderId}`);
+      } catch (execErr: any) {
+        console.error(`[MarketScanner] Exness auto-execution failed for ${setupId}:`, execErr);
+      }
+    }
 
     scannerHealth.totalSetupsFoundToday++;
-    console.log(`[MarketScanner] 🚀 New qualifying setup created and alert dispatched: ${setupId}`);
+    console.log(`[MarketScanner] 🚀 New qualifying setup persisted and alert dispatched: ${setupId}`);
   }
 }
 

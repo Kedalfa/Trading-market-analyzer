@@ -54,7 +54,11 @@ class ActiveSetupService {
    * (highest quality/confidence first, then newest).
    */
   public async getActiveSetups(filter?: { symbol?: string }): Promise<any[]> {
-    const query: Record<string, any> = { 'outcome.status': 'OPEN' };
+    const query: Record<string, any> = {
+      'outcome.status': {
+        $in: ['OPEN', 'WAITING_FOR_ENTRY', 'APPROACHING_ENTRY', 'ENTRY_REACHED', 'MONITORING_PAUSED'],
+      },
+    };
     if (filter?.symbol) {
       query.symbol = filter.symbol.replace('/', '').toUpperCase();
     }

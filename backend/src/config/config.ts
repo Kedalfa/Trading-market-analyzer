@@ -9,6 +9,19 @@ export const config = {
   newsCacheTtl: parseInt(process.env.NEWS_CACHE_TTL || '300', 10),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '8845842296:AAFGUYzQWIVYqwHV3wybu4USxmQUMaC8VIg',
   telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || 'Caleb_SMC_bot',
+  
+  // Exness Broker & Bridge Configuration
+  exness: {
+    enabled: process.env.EXNESS_ENABLED === 'true',
+    apiUrl: process.env.EXNESS_API_URL || 'https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai',
+    accountId: process.env.EXNESS_ACCOUNT_ID || '',
+    token: process.env.EXNESS_TOKEN || '',
+    server: process.env.EXNESS_SERVER || 'Exness-Real19',
+    accountType: (process.env.EXNESS_ACCOUNT_TYPE || 'standard') as 'standard' | 'raw_spread' | 'pro' | 'zero',
+    autoExecute: process.env.EXNESS_AUTO_EXECUTE === 'true',
+    maxRiskPercent: parseFloat(process.env.EXNESS_MAX_RISK_PERCENT || '1.0'),
+    defaultLotSize: parseFloat(process.env.EXNESS_DEFAULT_LOT_SIZE || '0.01'),
+  },
 };
 
 if (!config.mongoUri) {

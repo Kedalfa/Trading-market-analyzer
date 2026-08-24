@@ -14,23 +14,29 @@ import settingsRoutes from './routes/settingsRoutes';
 import telegramRoutes from './routes/telegramRoutes';
 
 import chartVisionRoutes from './routes/chartVisionRoutes';
+import exnessRoutes from './routes/exnessRoutes';
 
 const app = express();
 
 // ── Middleware ────────────────────────────────────────────────────
-app.use(cors({
+const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, server-to-server) or from allowed origins
-    if (!origin || origin === config.frontendOrigin || origin.startsWith('http://localhost')) {
+    // Allow requests from localhost:3000, 127.0.0.1, mobile, curl, or dev tooling
+    if (!origin || origin === config.frontendOrigin || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
       callback(null, true);
     } else {
-      callback(null, true); // Permissive in dev mode
+      callback(null, true); // Fully permissive for local development
     }
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
   credentials: true,
-}));
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -59,6 +65,7 @@ app.use('/api/trade-ideas', tradeIdeaRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/telegram', telegramRoutes);
 app.use('/api/chart-vision', chartVisionRoutes);
+app.use('/api/exness', exnessRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────────
 app.use((_req: Request, res: Response) => {

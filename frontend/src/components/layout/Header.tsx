@@ -7,6 +7,7 @@ import {
   Activity, Clock, Upload, BookOpen,
   Cpu, History, Send
 } from 'lucide-react';
+import { ExnessAccountWidget } from '@/components/broker/ExnessAccountWidget';
 
 interface HeaderProps {
   instruments: Instrument[];           // loaded dynamically from backend
@@ -19,6 +20,14 @@ interface HeaderProps {
   onOpenTelegramModal: () => void;
   activeTab: 'analyzer' | 'history' | 'journal_export' | 'learn';
   setActiveTab: (tab: 'analyzer' | 'history' | 'journal_export' | 'learn') => void;
+  currentSetup?: {
+    instrumentId: string;
+    symbol: string;
+    direction: 'BULLISH' | 'BEARISH';
+    entryPrice: number;
+    stopLossPrice: number;
+    targetPrice: number;
+  };
 }
 
 const TIMEFRAMES = ['1D', '4H', '1H', '15M', '5M', '1M_MIN'];
@@ -33,7 +42,8 @@ export function Header({
   onOpenVisionModal,
   onOpenTelegramModal,
   activeTab,
-  setActiveTab
+  setActiveTab,
+  currentSetup,
 }: HeaderProps) {
   // Real-time continuous timestamp clock (no drift, updates every 1000ms)
   const [currentTimeStr, setCurrentTimeStr] = useState<string>('');
@@ -144,6 +154,9 @@ export function Header({
             <Upload className="w-3.5 h-3.5" />
             <span>Chart Vision</span>
           </button>
+
+          {/* Exness Broker Integration */}
+          <ExnessAccountWidget currentSetup={currentSetup} />
 
           {/* Telegram AI Alerts Button */}
           <button

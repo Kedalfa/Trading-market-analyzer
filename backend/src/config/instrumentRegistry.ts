@@ -13,8 +13,9 @@ export interface InstrumentMapping {
   pipSize: number;
   tickSize: number;
   defaultTimeframe: string;
-  provider: 'binance' | 'yahoo' | 'twelvedata' | 'finnhub';
+  provider: 'binance' | 'yahoo' | 'twelvedata' | 'finnhub' | 'exness';
   providerSymbol: string;
+  exnessSymbol?: string;
   isActive: boolean;
 }
 
@@ -30,8 +31,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.0001,
     tickSize: 0.00001,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
+    provider: 'exness',
     providerSymbol: 'EURUSD=X',
+    exnessSymbol: 'EURUSD',
     isActive: true,
   },
   {
@@ -44,8 +46,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.0001,
     tickSize: 0.00001,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
+    provider: 'exness',
     providerSymbol: 'GBPUSD=X',
+    exnessSymbol: 'GBPUSD',
     isActive: true,
   },
   {
@@ -58,12 +61,13 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.01,
     tickSize: 0.001,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
+    provider: 'exness',
     providerSymbol: 'JPY=X',
+    exnessSymbol: 'USDJPY',
     isActive: true,
   },
 
-  // ── Crypto (Binance Spot) ───────────────────────────────────────
+  // ── Crypto (Spot / CFD) ─────────────────────────────────────────
   {
     id: 'BTCUSDT',
     displaySymbol: 'BTC/USDT',
@@ -74,8 +78,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 1.0,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'binance',
+    provider: 'exness',
     providerSymbol: 'BTCUSDT',
+    exnessSymbol: 'BTCUSD',
     isActive: true,
   },
   {
@@ -88,8 +93,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.1,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'binance',
+    provider: 'exness',
     providerSymbol: 'ETHUSDT',
+    exnessSymbol: 'ETHUSD',
     isActive: false, // Deactivated from live universe per trading requirement
   },
   {
@@ -102,8 +108,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.01,
     tickSize: 0.001,
     defaultTimeframe: '15M',
-    provider: 'binance',
+    provider: 'exness',
     providerSymbol: 'SOLUSDT',
+    exnessSymbol: 'SOLUSD',
     isActive: false, // Deactivated from live universe per trading requirement
   },
 
@@ -118,8 +125,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.1,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'binance',
+    provider: 'exness',
     providerSymbol: 'PAXGUSDT', // London Bullion physical spot gold backed 1:1
+    exnessSymbol: 'XAUUSD',
     isActive: true,
   },
 
@@ -134,8 +142,9 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.25,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
+    provider: 'exness',
     providerSymbol: '^GSPC',
+    exnessSymbol: 'US500',
     isActive: true,
   },
   {
@@ -148,12 +157,40 @@ export const INSTRUMENT_REGISTRY: InstrumentMapping[] = [
     pipSize: 0.25,
     tickSize: 0.01,
     defaultTimeframe: '15M',
-    provider: 'yahoo',
+    provider: 'exness',
     providerSymbol: '^IXIC',
+    exnessSymbol: 'USTEC', // Exness lists Nasdaq 100 as USTEC or USTECm
     isActive: true,
   },
 ];
 
+// O(1) lookup maps (populated once at module load)
+const _byId = new Map<string, InstrumentMapping>();
+const _byProviderSymbol = new Map<string, InstrumentMapping>();
+const _byExnessSymbol = new Map<string, InstrumentMapping>();
+
+for (const inst of INSTRUMENT_REGISTRY) {
+  _byId.set(inst.id, inst);
+  _byProviderSymbol.set(inst.providerSymbol, inst);
+  if (inst.exnessSymbol) {
+    _byExnessSymbol.set(inst.exnessSymbol.toUpperCase(), inst);
+    _byExnessSymbol.set(`${inst.exnessSymbol.toUpperCase()}M`, inst); // Support standard mini/micro 'm' suffix
+  }
+}
+
 export function getInstrumentMapping(id: string): InstrumentMapping | undefined {
-  return INSTRUMENT_REGISTRY.find(i => i.id === id || i.providerSymbol === id);
+  const clean = id.replace(/[\/\-_]/g, '').toUpperCase();
+  return _byId.get(id) ?? _byId.get(clean) ?? _byProviderSymbol.get(id) ?? _byExnessSymbol.get(clean);
+}
+
+export function resolveExnessSymbol(instrumentId: string, accountType: string = 'standard'): string {
+  const mapping = getInstrumentMapping(instrumentId);
+  const baseExnessSymbol = mapping?.exnessSymbol || instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
+  
+  // Standard accounts in Exness MT4/MT5 typically append 'm' (e.g. EURUSDm, XAUUSDm, USTECm)
+  // Raw Spread, Zero, and Pro accounts typically use raw root symbols (EURUSD, XAUUSD, USTEC)
+  if (accountType === 'standard' && !baseExnessSymbol.endsWith('m') && !baseExnessSymbol.endsWith('M')) {
+    return `${baseExnessSymbol}m`;
+  }
+  return baseExnessSymbol;
 }
