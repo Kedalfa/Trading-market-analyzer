@@ -62,13 +62,22 @@ export function detectOrderBlocks(
         // Evaluate mitigation / breaker status forward in time
         for (let k = disp.endIndex + 1; k < candles.length; k++) {
           const bar = candles[k];
+          const obMidpoint = (topPrice + bottomPrice) / 2;
+
           if (bar.low <= topPrice && bar.low >= bottomPrice) {
+            // Wick entered the OB — track as a touch but do NOT mark mitigated
             ob.touchCount++;
-            ob.isMitigated = true;
-            ob.mitigationTimestamp = bar.timestamp;
-            ob.validityStatus = 'MITIGATED';
+
+            // Mitigation requires a candle BODY CLOSE past the OB midpoint (50% CE rule)
+            // A body close past mid = institutional demand genuinely consumed
+            const bodyClose = Math.min(bar.open, bar.close);
+            if (bodyClose <= obMidpoint) {
+              ob.isMitigated = true;
+              ob.mitigationTimestamp = bar.timestamp;
+              ob.validityStatus = 'MITIGATED';
+            }
           } else if (bar.close < bottomPrice) {
-            // Violated: turns into Bearish Breaker Block
+            // Body closed BELOW the OB entirely: failed support → Bearish Breaker Block
             ob.validityStatus = 'BREAKER';
             ob.isBreaker = true;
             ob.classificationReason += ' (Failed support transformed into Bearish Breaker)';
@@ -118,13 +127,21 @@ export function detectOrderBlocks(
 
         for (let k = disp.endIndex + 1; k < candles.length; k++) {
           const bar = candles[k];
+          const obMidpoint = (topPrice + bottomPrice) / 2;
+
           if (bar.high >= bottomPrice && bar.high <= topPrice) {
+            // Wick entered OB from below — touch recorded
             ob.touchCount++;
-            ob.isMitigated = true;
-            ob.mitigationTimestamp = bar.timestamp;
-            ob.validityStatus = 'MITIGATED';
+
+            // Mitigation requires a body CLOSE past the OB midpoint (50% CE rule)
+            const bodyClose = Math.max(bar.open, bar.close);
+            if (bodyClose >= obMidpoint) {
+              ob.isMitigated = true;
+              ob.mitigationTimestamp = bar.timestamp;
+              ob.validityStatus = 'MITIGATED';
+            }
           } else if (bar.close > topPrice) {
-            // Violated: turns into Bullish Breaker Block
+            // Body closed ABOVE the OB entirely: failed resistance → Bullish Breaker Block
             ob.validityStatus = 'BREAKER';
             ob.isBreaker = true;
             ob.classificationReason += ' (Failed resistance transformed into Bullish Breaker)';

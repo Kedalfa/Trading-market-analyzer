@@ -1,8 +1,19 @@
 /**
  * Telegram Bot API Service
- * Handles official Telegram Bot API communications, automatic user provisioning,
- * persistent menu keyboards, slash command dispatching, active setup inspection,
- * and detailed evidence-based setup breakdowns.
+ *
+ * Security model:
+ * ─────────────────────────────────────────────────────────────────
+ * 1. Every /start ALWAYS resets the current session. Re-auth is
+ *    required on every fresh /start (Part 6 / Test G).
+ * 2. isUserAuthenticated() evaluates sessionIsActive AND sessionExpiresAt.
+ *    A stale isAuthorized flag alone is NOT sufficient.
+ * 3. handleCallbackQuery() checks authentication at entry — no bypass.
+ * 4. NO hardcoded admin Telegram IDs exist anywhere in this file.
+ * 5. /getcode and /request_code are NOT supported — codes are
+ *    generated on the website only (Part 20).
+ * 6. The authoritative Telegram identity is the numeric Telegram
+ *    user ID stored in telegramUserId, not username or display name.
+ * ─────────────────────────────────────────────────────────────────
  */
 
 import crypto from 'crypto';
@@ -33,9 +44,7 @@ export interface SendMessageOptions {
   };
 }
 
-/**
- * Escapes reserved HTML characters for Telegram HTML mode
- */
+/** Escapes reserved HTML characters for Telegram HTML mode */
 export function escapeHtml(str: string): string {
   if (!str) return '';
   return String(str)
@@ -44,15 +53,27 @@ export function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
-/**
- * Checks if a URL is valid for Telegram inline button (must be HTTPS and not localhost)
- */
+/** Checks if a URL is valid for Telegram inline button */
 export function isValidTelegramUrl(url?: string): boolean {
   if (!url) return false;
   return url.startsWith('https://') && !url.includes('localhost') && !url.includes('127.0.0.1');
 }
 
-// Persistent main menu keyboard shown at bottom of chat
+// SESSION_DURATION: 24 hours. Session is always reset on /start (Part 6).
+const SESSION_DURATION_MS = 24 * 60 * 60 * 1000;
+
+// Rate limiting: max failed code attempts before lockout
+const MAX_CODE_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+
+// Auth-gate inline button (only button shown to unauthenticated users)
+const AUTH_GATE_KEYBOARD = {
+  inline_keyboard: [
+    [{ text: '🌐 Open Web Dashboard to Get Your Code', callback_data: 'cmd_how_to_connect' }],
+  ],
+};
+
+// Protected main menu (shown only to authenticated users)
 const MAIN_MENU_KEYBOARD = {
   keyboard: [
     [{ text: '🎯 Active Setups' }, { text: '📡 My Watchlist' }],
@@ -61,6 +82,22 @@ const MAIN_MENU_KEYBOARD = {
   ],
   resize_keyboard: true,
 };
+
+/** The single auth gate message. No trading info. No menus. */
+function buildAuthGateMessage(firstName: string): string {
+  return (
+    `🔐 <b>VERIFICATION REQUIRED</b>\n\n` +
+    `Welcome, <b>${escapeHtml(firstName)}</b>.\n\n` +
+    `This bot provides private SMC trading signals and live setup alerts.\n` +
+    `<b>You must verify your account before accessing any protected information.</b>\n\n` +
+    `<b>How to connect:</b>\n` +
+    `1. Open the web dashboard\n` +
+    `2. Navigate to <b>Telegram → Generate Code</b>\n` +
+    `3. Copy the 6-digit verification code\n` +
+    `4. Send that code here as a plain message\n\n` +
+    `<i>Codes expire in 10 minutes and are single-use.</i>`
+  );
+}
 
 class TelegramBotService {
   private botToken: string;
@@ -76,21 +113,75 @@ class TelegramBotService {
     return !!this.botToken && this.botToken.length > 10;
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // AUTHENTICATION UTILITY — Single source of truth for session validity
+  // ─────────────────────────────────────────────────────────────────────────
+
   /**
-   * Send a message to a specific Telegram Chat ID
+   * Returns true ONLY if the user has an active, non-expired session.
+   * isAuthorized alone is NOT sufficient — the session must still be live.
    */
+  private isUserAuthenticated(user: any): boolean {
+    if (!user) return false;
+    if (!user.sessionIsActive) return false;
+    if (!user.sessionExpiresAt) return false;
+    return new Date() < new Date(user.sessionExpiresAt);
+  }
+
+  /**
+   * Creates a fresh session for the user. Called after successful code verification.
+   */
+  private async createSession(user: any, now: Date = new Date()): Promise<string> {
+    const token = crypto.randomUUID();
+    user.sessionToken = token;
+    user.sessionCreatedAt = now;
+    user.sessionExpiresAt = new Date(now.getTime() + SESSION_DURATION_MS);
+    user.sessionLastActivityAt = now;
+    user.sessionIsActive = true;
+    user.isAuthorized = true;
+    user.authorizedAt = now;
+    await user.save();
+    return token;
+  }
+
+  /**
+   * Destroys the current session. Called on /start (always), disconnect, revoke.
+   */
+  private async destroySession(user: any): Promise<void> {
+    user.sessionToken = undefined;
+    user.sessionCreatedAt = undefined;
+    user.sessionExpiresAt = undefined;
+    user.sessionLastActivityAt = undefined;
+    user.sessionIsActive = false;
+    // Do NOT set isAuthorized=false here — that is a permanent authorization flag.
+    // The session is what controls live bot access (Part 6).
+    await user.save();
+  }
+
+  /**
+   * Touches the session last-activity timestamp without creating a new session.
+   */
+  private async touchSession(user: any): Promise<void> {
+    user.sessionLastActivityAt = new Date();
+    user.lastActiveAt = new Date();
+    await user.save();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SEND MESSAGE
+  // ─────────────────────────────────────────────────────────────────────────
+
   public async sendMessage(
     chatId: number | string,
     text: string,
     options: SendMessageOptions = { parse_mode: 'HTML', disable_web_page_preview: true }
   ): Promise<boolean> {
     if (!this.isConfigured()) {
-      console.warn('[TelegramBot] Cannot send message — TELEGRAM_BOT_TOKEN not configured.');
+      console.warn('[TelegramBot] Cannot send — TELEGRAM_BOT_TOKEN not configured.');
       return false;
     }
 
     try {
-      // Sanitize inline keyboard URLs if any (filter out localhost)
       if (options.reply_markup?.inline_keyboard) {
         options.reply_markup.inline_keyboard = options.reply_markup.inline_keyboard.map(row =>
           row.map(btn => {
@@ -106,11 +197,7 @@ class TelegramBotService {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text,
-          ...options,
-        }),
+        body: JSON.stringify({ chat_id: chatId, text, ...options }),
       });
 
       const data: any = await res.json();
@@ -125,16 +212,16 @@ class TelegramBotService {
     }
   }
 
-  /**
-   * Start long-polling for incoming Telegram updates and commands
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // POLLING
+  // ─────────────────────────────────────────────────────────────────────────
+
   public startPolling(): void {
     if (!this.isConfigured()) {
-      console.log('[TelegramBot] Polling not started: TELEGRAM_BOT_TOKEN is not configured in backend/.env');
+      console.log('[TelegramBot] Polling not started: TELEGRAM_BOT_TOKEN is not configured.');
       return;
     }
     if (this.isPolling) return;
-
     this.isPolling = true;
     console.log(`[TelegramBot] Official Bot polling active for @${config.telegramBotUsername}`);
     this.pollUpdates();
@@ -176,18 +263,24 @@ class TelegramBotService {
     }
   }
 
-  /**
-   * Main router for slash commands, keyboard menu taps & text messages
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // INCOMING MESSAGE HANDLER
+  // ─────────────────────────────────────────────────────────────────────────
+
   private async handleIncomingMessage(msg: any): Promise<void> {
-    const chatId = msg.chat?.id;
-    const rawText = (msg.text || '').trim();
-    const fromUsername = msg.from?.username || '';
-    const firstName = msg.from?.first_name || 'Trader';
+    const chatId: number = msg.chat?.id;
+    const rawText: string = (msg.text || '').trim();
+
+    // Authoritative Telegram numeric user ID — never use username/display name for auth
+    const telegramUserId: number = msg.from?.id;
+    const fromUsername: string = msg.from?.username || '';
+    const firstName: string = msg.from?.first_name || 'Trader';
+    const lastName: string = msg.from?.last_name || '';
+    const languageCode: string = msg.from?.language_code || '';
 
     if (!chatId || !rawText) return;
 
-    // Normalize text / menu taps
+    // ── Normalize menu button taps ───────────────────────────────────────
     let command = rawText.toLowerCase();
     if (rawText === '🎯 Active Setups' || rawText === 'Active Setups') command = '/setups';
     if (rawText === '📡 My Watchlist' || rawText === 'My Watchlist') command = '/watchlist';
@@ -195,294 +288,274 @@ class TelegramBotService {
     if (rawText === '⚙️ Alert Settings' || rawText === 'Alert Settings') command = '/settings';
     if (rawText === '📖 Help Guide' || rawText === 'Help Guide') command = '/help';
     if (rawText === '🌐 Web Terminal Info' || rawText === 'Web Terminal Info') {
-      await this.sendMessage(chatId, `🌐 <b>SMC Market Analyzer Web Terminal:</b>\n\nAccess your live trading workspace at:\n<code>${config.frontendOrigin}</code>`, {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      // Web Terminal Info is safe to show without auth
+      await this.sendMessage(chatId,
+        `🌐 <b>SMC Market Analyzer Web Terminal:</b>\n\n<code>${config.frontendOrigin}</code>\n\n<i>Generate your verification code from the dashboard to connect this bot.</i>`,
+        { parse_mode: 'HTML' }
+      );
       return;
     }
 
-    // Find or Auto-provision user record for this chatId
-    let user = await TelegramUser.findOne({ chatId });
-    const isPreAuthorizedAdmin = chatId === 5543285096 || chatId === 7308906081;
+    // ── Look up user record by telegramUserId (authoritative numeric ID) ─
+    // Fall back to chatId for legacy records without telegramUserId yet
+    let user = telegramUserId
+      ? await TelegramUser.findOne({ telegramUserId })
+      : await TelegramUser.findOne({ chatId });
 
-    if (!user) {
-      user = await TelegramUser.create({
-        userId: `tg_${chatId}`,
-        chatId,
-        telegramUsername: fromUsername,
-        firstName,
-        isConnected: true,
-        isAuthorized: isPreAuthorizedAdmin,
-        authorizedAt: isPreAuthorizedAdmin ? new Date() : undefined,
-        connectedAt: new Date(),
-        lastActiveAt: new Date(),
-        watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],
-        settings: {
-          minQuality: 'HIGH',
-          timeframes: { htf: '4H', intermediate: '1H', setup: '15M', entry: '5M' },
-          sessions: ['London', 'New York', 'London / New York Overlap'],
-          newsFilter: 'BLOCK_HIGH',
-          alertTypes: {
-            newSetup: true,
-            entryApproaching: true,
-            entryTriggered: true,
-            tp1: true,
-            tp2: true,
-            tp3: true,
-            sl: true,
-            invalidated: true,
-            expired: false,
+    // ─────────────────────────────────────────────────────────────────────
+    // /start — ALWAYS resets the session. Re-auth required every /start.
+    // This is the Part 6 session boundary.
+    // ─────────────────────────────────────────────────────────────────────
+    if (command.startsWith('/start')) {
+      const parts = rawText.split(' ');
+      const inlineCode = parts[1]?.trim(); // /start <code> from direct link
+
+      if (!user) {
+        // First-time user: create a minimal record (not connected, not authorized)
+        user = await TelegramUser.create({
+          userId: `tg_${telegramUserId || chatId}`,
+          linkedWebUserId: 'user_1',
+          telegramUserId: telegramUserId || undefined,
+          chatId,
+          telegramUsername: fromUsername,
+          firstName,
+          lastName,
+          languageCode,
+          isConnected: false,
+          isAuthorized: false,
+          sessionIsActive: false,
+          failedAuthAttempts: 0,
+          watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],
+          settings: {
+            minQuality: 'HIGH',
+            timeframes: { htf: '4H', intermediate: '1H', setup: '15M', entry: '5M' },
+            sessions: ['London', 'New York', 'London / New York Overlap'],
+            newsFilter: 'BLOCK_HIGH',
+            alertTypes: {
+              newSetup: true, entryApproaching: true, entryTriggered: true,
+              tp1: true, tp2: true, tp3: true, sl: true, invalidated: true, expired: false,
+            },
+            isMuted: false,
           },
-          isMuted: false,
-        },
+        });
+      } else {
+        // Existing user: update identity fields
+        if (telegramUserId && !user.telegramUserId) user.telegramUserId = telegramUserId;
+        if (chatId && !user.chatId) user.chatId = chatId;
+        if (fromUsername) user.telegramUsername = fromUsername;
+        if (firstName) user.firstName = firstName;
+        if (lastName) user.lastName = lastName;
+        if (languageCode) user.languageCode = languageCode;
+      }
+
+      // ALWAYS destroy the current session on /start (Part 6 requirement)
+      await this.destroySession(user);
+      console.log(`[TelegramBot] /start from telegramUserId=${telegramUserId}, chatId=${chatId} — session reset, re-auth required.`);
+
+      // If a code was passed via deep link (/start <code>): try to verify it immediately
+      if (inlineCode) {
+        await this.handleConnectCode(chatId, user, inlineCode, fromUsername, firstName, telegramUserId);
+        return;
+      }
+
+      // No code: show auth gate only
+      await this.sendMessage(chatId, buildAuthGateMessage(firstName), {
+        parse_mode: 'HTML',
+        reply_markup: AUTH_GATE_KEYBOARD,
       });
-    } else {
-      user.lastActiveAt = new Date();
-      if (!user.isConnected) {
-        user.isConnected = true;
-      }
-      if (isPreAuthorizedAdmin && !user.isAuthorized) {
-        user.isAuthorized = true;
-        user.authorizedAt = new Date();
-      }
-      await user.save();
-    }
-
-    // ── Verification Code Request Handler ─────────────────────────────
-    if (command === '/request_code' || command === '/getcode') {
-      await this.handleRequestVerificationCode(chatId, user);
       return;
     }
 
-    // ── Verification Code Submission Handler (/verify <code> or 6-digit input) ──
-    const isSixDigitCode = /^\d{6}$/.test(rawText.trim());
-    if (command.startsWith('/verify') || isSixDigitCode) {
-      const codeInput = isSixDigitCode ? rawText.trim() : rawText.split(' ')[1]?.trim();
-      await this.handleVerifyCode(chatId, user, codeInput);
+    // For all other messages: we need a user record
+    if (!user) {
+      // Complete stranger, no record at all
+      await this.sendMessage(chatId, `🔐 <b>Verification Required</b>\n\nPlease send /start to begin the authentication process.`, {
+        parse_mode: 'HTML',
+      });
       return;
     }
 
-    // ── Revoke Access Handler (/revoke or /disconnect) ─────────────────
+    // Update identity fields on any interaction
+    if (telegramUserId && !user.telegramUserId) user.telegramUserId = telegramUserId;
+    if (chatId && user.chatId !== chatId) user.chatId = chatId;
+    user.lastActiveAt = new Date();
+    // (save happens below or in specific handlers)
+
+    // ── /revoke or /disconnect ───────────────────────────────────────────
     if (command === '/revoke' || command === '/disconnect') {
+      await this.destroySession(user);
       user.isAuthorized = false;
-      user.authorizedAt = undefined;
+      user.isConnected = false;
+      user.connectionCode = undefined;
+      user.codeExpiresAt = undefined;
       user.verificationCodeHash = undefined;
       user.verificationExpiresAt = undefined;
       await user.save();
 
-      await this.sendMessage(chatId, `🔒 <b>Access Revoked</b>\n\nYour Telegram account has been disconnected from private signal alerts. To reconnect, send /start and verify your account.`, {
-        parse_mode: 'HTML',
-      });
+      await this.sendMessage(chatId,
+        `🔒 <b>Session Terminated</b>\n\nYour bot session has been ended. Send /start to begin a new authentication session.`,
+        { parse_mode: 'HTML' }
+      );
       return;
     }
 
-    // Handle /start and /start <code>
-    if (command.startsWith('/start')) {
-      const parts = rawText.split(' ');
-      const code = parts[1]?.trim().toUpperCase();
+    // ── 5/6-digit code submission (raw text) ─────────────────────────────
+    const isNumericCode = /^\d{5,6}$/.test(rawText.trim());
+    if (isNumericCode) {
+      await this.handleVerifyCode(chatId, user, rawText.trim(), telegramUserId);
+      return;
+    }
 
-      if (code) {
-        await this.handleConnectCode(chatId, code, fromUsername, firstName);
-        return;
-      }
+    // ── /verify <code> ───────────────────────────────────────────────────
+    if (command.startsWith('/verify')) {
+      const codeInput = rawText.split(' ')[1]?.trim();
+      await this.handleVerifyCode(chatId, user, codeInput, telegramUserId);
+      return;
+    }
 
-      // If user is not authorized, enforce private access gate
-      if (!user.isAuthorized) {
-        const authGateMsg = `🔒 <b>PRIVATE SIGNAL ACCESS REQUIRED</b>\n\n` +
-          `Welcome, <b>${escapeHtml(firstName)}</b>!\n\n` +
-          `This Telegram bot provides exclusive Smart Money Concepts (SMC) trade setups, live entry tracking, and automated lifecycle alerts.\n\n` +
-          `Your account is currently <b>unauthorized</b>. You must verify your account before receiving private trading signals and accessing active setups.\n\n` +
-          `<i>Click the button below to generate your single-use 6-digit verification code:</i>`;
-
-        await this.sendMessage(chatId, authGateMsg, {
+    // ─────────────────────────────────────────────────────────────────────
+    // AUTHENTICATION GUARD — All protected commands below this line
+    // The session must be active and non-expired.
+    // ─────────────────────────────────────────────────────────────────────
+    if (!this.isUserAuthenticated(user)) {
+      await user.save(); // save lastActiveAt update
+      await this.sendMessage(chatId,
+        `🔐 <b>Authentication Required</b>\n\nYour session has expired or is not active.\n\nSend /start to begin a new verification session, then enter your code from the web dashboard.`,
+        {
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }],
-            ],
-          },
-        });
-        return;
-      }
-
-      const welcome = `🏛️ <b>SMC MARKET ANALYZER — AI STRUCTURAL BOT</b>\n\n` +
-        `Welcome back, <b>${escapeHtml(firstName)}</b>! You are verified and connected to the institutional Smart Money Concept analysis & real-time alert engine.\n\n` +
-        `⚡ <b>Institutional Confluence Engine:</b>\n` +
-        `• <b>Live Market Feeds:</b> Forex (Yahoo), Gold (Spot Gold Bullion), Crypto (Binance)\n` +
-        `• <b>Deterministic SMC:</b> BOS, MSS, Sweeps, FVGs, Order Blocks, Dealing Ranges\n` +
-        `• <b>Proactive Alerts:</b> Grade <b>A/A+ Setups Pushed Automatically</b>\n` +
-        `• <b>Active Watchlist:</b> ${user.watchlist.join(', ')}\n\n` +
-        `Use the menu buttons below to inspect active setups or configure alerts.`;
-
-      await this.sendMessage(chatId, welcome, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          ...MAIN_MENU_KEYBOARD,
-          inline_keyboard: [
-            [
-              { text: '🎯 Active Setups', callback_data: 'cmd_setups' },
-              { text: '📡 Watchlist', callback_data: 'cmd_watchlist' },
-            ],
-            [
-              { text: '⚙️ Settings', callback_data: 'cmd_settings' },
-              { text: '📊 System Status', callback_data: 'cmd_status' },
-            ],
-          ],
-        },
-      });
+          reply_markup: AUTH_GATE_KEYBOARD,
+        }
+      );
       return;
     }
 
-    // ── Authorization Guard for all operational commands ──────────────
-    if (!user.isAuthorized) {
-      await this.sendMessage(chatId, `🔒 <b>Access Denied — Account Verification Required</b>\n\nYou must verify your Telegram account before accessing setups, watchlists, or alerts.`, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }],
-          ],
-        },
-      });
-      return;
-    }
+    // Authenticated: touch session activity
+    await this.touchSession(user);
 
-    // Handle /connect <code>
+    // ── /connect <code> (alternative to deep link) ──────────────────────
     if (command.startsWith('/connect')) {
-      const parts = rawText.split(' ');
-      const code = parts[1]?.trim().toUpperCase();
+      const code = rawText.split(' ')[1]?.trim();
       if (!code) {
-        await this.sendMessage(chatId, '⚠️ Please provide your connection code.\nExample: <code>/connect ABC123</code>');
+        await this.sendMessage(chatId, '⚠️ Usage: <code>/connect YOUR_CODE</code>\n\nGenerate a code from the web dashboard first.', { parse_mode: 'HTML' });
         return;
       }
-      await this.handleConnectCode(chatId, code, fromUsername, firstName);
-      return;
-    }
-
-    // Handle /help
-    if (command === '/help') {
-      const helpMsg = `📖 <b>SMC Bot Command Guide:</b>\n\n` +
-        `• <code>/setups</code> — View ALL active high-quality SMC setups from database\n` +
-        `• <code>/status</code> — Live feed status, AI engine & active setups\n` +
-        `• <code>/watchlist</code> — Show your monitored instruments\n` +
-        `• <code>/add &lt;symbol&gt;</code> — Add pair (e.g. <code>/add EURUSD</code>, <code>/add XAUUSD</code>)\n` +
-        `• <code>/remove &lt;symbol&gt;</code> — Remove pair from watchlist\n` +
-        `• <code>/settings</code> — View and adjust alert filters\n` +
-        `• <code>/alerts</code> — View recent alert history\n` +
-        `• <code>/stop</code> — Pause all alert notifications\n` +
-        `• <code>/resume</code> — Resume alert notifications\n` +
-        `• <code>/help</code> — Show this guide`;
-
-      await this.sendMessage(chatId, helpMsg, {
+      // If already authenticated, they don't need to reconnect
+      await this.sendMessage(chatId, '✅ <b>You are already authenticated.</b>\n\nYour session is active. Use the menu to access setups.', {
         parse_mode: 'HTML',
         reply_markup: MAIN_MENU_KEYBOARD,
       });
       return;
     }
 
-    // Handle /status
+    // ── /help ────────────────────────────────────────────────────────────
+    if (command === '/help') {
+      const helpMsg =
+        `📖 <b>SMC Bot Command Guide:</b>\n\n` +
+        `• <code>/setups</code> — View ALL active high-quality SMC setups\n` +
+        `• <code>/status</code> — Live feed status &amp; active setups summary\n` +
+        `• <code>/watchlist</code> — Show your monitored instruments\n` +
+        `• <code>/add &lt;symbol&gt;</code> — Add pair (e.g. <code>/add EURUSD</code>)\n` +
+        `• <code>/remove &lt;symbol&gt;</code> — Remove pair from watchlist\n` +
+        `• <code>/settings</code> — View alert preferences\n` +
+        `• <code>/alerts</code> — View recent alert history\n` +
+        `• <code>/stop</code> — Pause all notifications\n` +
+        `• <code>/resume</code> — Resume notifications\n` +
+        `• <code>/start</code> — Begin a new session (requires re-verification)\n\n` +
+        `<i>To revoke access: send /revoke</i>`;
+
+      await this.sendMessage(chatId, helpMsg, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
+      return;
+    }
+
+    // ── /status ──────────────────────────────────────────────────────────
     if (command === '/status') {
       const openSetups = await activeSetupService.getActiveSetups();
-      const statusMsg = `📊 <b>SMC Analyzer Live System Status:</b>\n\n` +
+      const sessionExpiresIn = user.sessionExpiresAt
+        ? Math.max(0, Math.round((new Date(user.sessionExpiresAt).getTime() - Date.now()) / 60000))
+        : 0;
+      const statusMsg =
+        `📊 <b>SMC Analyzer Live System Status:</b>\n\n` +
         `🤖 <b>Bot Engine:</b> 🟢 Operational (@${config.telegramBotUsername})\n` +
-        `📡 <b>Market Feeds:</b> 🟢 Live (Yahoo Finance & Binance)\n` +
-        `🧠 <b>AI Intelligence:</b> 🟢 Active (Deterministic + Confluence)\n` +
+        `📡 <b>Market Feeds:</b> 🟢 Live\n` +
+        `🔒 <b>Session:</b> 🟢 Active (expires in ${sessionExpiresIn}m)\n` +
         `🔔 <b>Notifications:</b> ${user.settings.isMuted ? '🔴 Paused (/resume)' : '🟢 Active'}\n` +
-        `🎯 <b>Min Quality Threshold:</b> Grade <b>${user.settings.minQuality}</b> (Score ≥ 75)\n` +
+        `🎯 <b>Min Quality:</b> Grade <b>${user.settings.minQuality}</b>\n` +
         `🛡️ <b>News Protection:</b> ${user.settings.newsFilter}\n` +
-        `📋 <b>Active Watchlist (${user.watchlist.length}):</b> ${user.watchlist.join(', ')}\n` +
+        `📋 <b>Watchlist (${user.watchlist.length}):</b> ${user.watchlist.join(', ')}\n` +
         `📈 <b>Active Setups in DB:</b> <b>${openSetups.length} Open</b>\n\n` +
         `<i>Web Terminal: ${config.frontendOrigin}</i>`;
 
-      await this.sendMessage(chatId, statusMsg, {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      await this.sendMessage(chatId, statusMsg, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
-    // Handle /watchlist
+    // ── /watchlist ───────────────────────────────────────────────────────
     if (command === '/watchlist') {
-      const list = user.watchlist.map(s => `• <b>${s}</b>`).join('\n');
-      const msg = `📋 <b>Your Monitored Watchlist:</b>\n\n${list}\n\n` +
-        `<i>Add or remove with <code>/add EURUSD</code> or <code>/remove EURUSD</code></i>`;
-      await this.sendMessage(chatId, msg, {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      const list = user.watchlist.map((s: string) => `• <b>${s}</b>`).join('\n');
+      await this.sendMessage(chatId,
+        `📋 <b>Your Monitored Watchlist:</b>\n\n${list}\n\n<i>Add/remove: <code>/add EURUSD</code> or <code>/remove EURUSD</code></i>`,
+        { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD }
+      );
       return;
     }
 
-    // Handle /add <symbol>
+    // ── /add <symbol> ────────────────────────────────────────────────────
     if (command.startsWith('/add')) {
       const sym = rawText.split(' ')[1]?.trim().toUpperCase().replace('/', '');
       if (!sym) {
-        await this.sendMessage(chatId, '⚠️ Please specify a symbol to add. Example: <code>/add EURUSD</code>');
+        await this.sendMessage(chatId, '⚠️ Please specify a symbol. Example: <code>/add EURUSD</code>', { parse_mode: 'HTML' });
         return;
       }
+      const supported = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'US500', 'NAS100'];
       const mapping = getInstrumentMapping(sym);
-      if (!mapping && !['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'US500', 'NAS100'].includes(sym)) {
-        await this.sendMessage(chatId, `⚠️ Symbol <b>${escapeHtml(sym)}</b> is not supported.\nSupported: EURUSD, GBPUSD, USDJPY, XAUUSD, BTCUSDT, ETHUSDT, SOLUSDT, US500, NAS100.`);
+      if (!mapping && !supported.includes(sym)) {
+        await this.sendMessage(chatId, `⚠️ Symbol <b>${escapeHtml(sym)}</b> is not supported.\nSupported: ${supported.join(', ')}.`, { parse_mode: 'HTML' });
         return;
       }
       if (!user.watchlist.includes(sym)) {
         user.watchlist.push(sym);
         await user.save();
-        await this.sendMessage(chatId, `✅ Added <b>${escapeHtml(sym)}</b> to your watchlist.\nCurrent Watchlist: ${user.watchlist.join(', ')}`, {
-          parse_mode: 'HTML',
-          reply_markup: MAIN_MENU_KEYBOARD,
-        });
+        await this.sendMessage(chatId, `✅ Added <b>${escapeHtml(sym)}</b>. Watchlist: ${user.watchlist.join(', ')}`, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       } else {
-        await this.sendMessage(chatId, `ℹ️ <b>${escapeHtml(sym)}</b> is already in your watchlist.`, {
-          parse_mode: 'HTML',
-          reply_markup: MAIN_MENU_KEYBOARD,
-        });
+        await this.sendMessage(chatId, `ℹ️ <b>${escapeHtml(sym)}</b> is already in your watchlist.`, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       }
       return;
     }
 
-    // Handle /remove <symbol>
+    // ── /remove <symbol> ─────────────────────────────────────────────────
     if (command.startsWith('/remove')) {
       const sym = rawText.split(' ')[1]?.trim().toUpperCase().replace('/', '');
       if (!sym) {
-        await this.sendMessage(chatId, '⚠️ Please specify a symbol to remove. Example: <code>/remove EURUSD</code>');
+        await this.sendMessage(chatId, '⚠️ Please specify a symbol. Example: <code>/remove EURUSD</code>', { parse_mode: 'HTML' });
         return;
       }
-      user.watchlist = user.watchlist.filter(s => s !== sym);
+      user.watchlist = user.watchlist.filter((s: string) => s !== sym);
       await user.save();
-      await this.sendMessage(chatId, `✅ Removed <b>${escapeHtml(sym)}</b> from watchlist.\nCurrent Watchlist: ${user.watchlist.join(', ') || 'Empty'}`, {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      await this.sendMessage(chatId, `✅ Removed <b>${escapeHtml(sym)}</b>. Watchlist: ${user.watchlist.join(', ') || 'Empty'}`, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
-    // Handle /stop & /resume
+    // ── /stop & /resume ──────────────────────────────────────────────────
     if (command === '/stop') {
       user.settings.isMuted = true;
       await user.save();
-      await this.sendMessage(chatId, '🔕 <b>Alerts Paused</b>. You will not receive notifications until you send /resume.', {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      await this.sendMessage(chatId, '🔕 <b>Alerts Paused.</b> Send /resume to reactivate.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
     if (command === '/resume') {
       user.settings.isMuted = false;
       await user.save();
-      await this.sendMessage(chatId, '🔔 <b>Alerts Resumed</b>. You will now receive high-quality SMC setup notifications.', {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      await this.sendMessage(chatId, '🔔 <b>Alerts Resumed.</b> You will now receive high-quality SMC setup notifications.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
-    // Handle /settings
+    // ── /settings ────────────────────────────────────────────────────────
     if (command === '/settings') {
       const s = user.settings;
-      const settingsMsg = `⚙️ <b>Your Alert Preferences:</b>\n\n` +
-        `• <b>Min Setup Quality:</b> ${s.minQuality} (Grade A/A+ ≥ 75)\n` +
-        `• <b>News Filter:</b> ${s.newsFilter} (Blocks alerts during high-impact events)\n` +
+      const settingsMsg =
+        `⚙️ <b>Your Alert Preferences:</b>\n\n` +
+        `• <b>Min Setup Quality:</b> ${s.minQuality}\n` +
+        `• <b>News Filter:</b> ${s.newsFilter}\n` +
         `• <b>Active Sessions:</b> ${s.sessions.join(', ')}\n` +
         `• <b>Timeframes:</b> HTF: ${s.timeframes.htf} | Setup: ${s.timeframes.setup} | Entry: ${s.timeframes.entry}\n` +
         `• <b>Status:</b> ${s.isMuted ? '🔴 Paused' : '🟢 Active'}\n\n` +
@@ -492,24 +565,22 @@ class TelegramBotService {
         parse_mode: 'HTML',
         reply_markup: {
           ...MAIN_MENU_KEYBOARD,
-          inline_keyboard: [
-            [
-              { text: s.isMuted ? '🔔 Resume Alerts' : '🔕 Pause Alerts', callback_data: s.isMuted ? 'action_resume' : 'action_stop' },
-            ],
-          ],
+          inline_keyboard: [[
+            { text: s.isMuted ? '🔔 Resume Alerts' : '🔕 Pause Alerts', callback_data: s.isMuted ? 'action_resume' : 'action_stop' },
+          ]],
         },
       });
       return;
     }
 
-    // Handle /setups (Returns ALL active setups without arbitrary limit)
+    // ── /setups ──────────────────────────────────────────────────────────
     if (command === '/setups') {
       const openSetups = await activeSetupService.getActiveSetups();
       if (openSetups.length === 0) {
-        await this.sendMessage(chatId, 'ℹ️ <b>No Active Open Setups in Database</b>\n\nThe background scanner is continuously evaluating watchlist pairs for high-confluence Grade A setups.', {
-          parse_mode: 'HTML',
-          reply_markup: MAIN_MENU_KEYBOARD,
-        });
+        await this.sendMessage(chatId,
+          'ℹ️ <b>No Active Open Setups in Database</b>\n\nThe background scanner is continuously evaluating watchlist pairs for high-confluence Grade A setups.',
+          { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD }
+        );
         return;
       }
 
@@ -517,44 +588,41 @@ class TelegramBotService {
         `<i>Tap any setup button below to view detailed evidence and structural reasoning:</i>\n\n`;
 
       const inlineKeyboardButtons: InlineKeyboardButton[][] = [];
-
-      openSetups.forEach((a, idx) => {
+      openSetups.forEach((a: any, idx: number) => {
         const isBull = a.direction === 'BULLISH';
         const icon = isBull ? '🟢' : '🔴';
-        msg += `<b>${idx + 1}. ${icon} ${a.symbol} (${a.timeframe}) — ${a.direction}</b>\n` +
+        const tp1 = a.takeProfit1;
+        const tp2 = a.takeProfit2 || a.targetPrice;
+        const tp3 = a.takeProfit3;
+        msg +=
+          `<b>${idx + 1}. ${icon} ${a.symbol} (${a.timeframe}) — ${a.direction}</b>\n` +
           `• <b>ID:</b> <code>${a.analysisId}</code>\n` +
-          `• <b>Entry:</b> <code>${a.entryPrice}</code> | <b>Target:</b> <code>${a.targetPrice}</code> (<b>${a.riskRewardRatio}R</b>)\n` +
+          `• <b>Entry:</b> <code>${a.entryPrice}</code> | <b>SL:</b> <code>${a.stopLossPrice}</code>\n` +
+          (tp1 != null ? `• <b>TP1:</b> <code>${tp1}</code>\n` : '') +
+          `• <b>TP2:</b> <code>${tp2}</code> (<b>${a.riskRewardRatio}R</b>)\n` +
+          (tp3 != null ? `• <b>TP3:</b> <code>${tp3}</code>\n` : '') +
           `• <b>Grade:</b> ${a.setupQuality?.grade} (${a.setupQuality?.totalScore}/100)\n\n`;
 
-        // 2 buttons per row
         const btnText = `${icon} ${a.symbol} (${a.direction})`;
-        const callbackData = `view_setup_${a.analysisId}`;
-
         if (idx % 2 === 0) {
-          inlineKeyboardButtons.push([{ text: btnText, callback_data: callbackData }]);
+          inlineKeyboardButtons.push([{ text: btnText, callback_data: `view_setup_${a.analysisId}` }]);
         } else {
-          inlineKeyboardButtons[inlineKeyboardButtons.length - 1].push({ text: btnText, callback_data: callbackData });
+          inlineKeyboardButtons[inlineKeyboardButtons.length - 1].push({ text: btnText, callback_data: `view_setup_${a.analysisId}` });
         }
       });
 
       await this.sendMessage(chatId, msg, {
         parse_mode: 'HTML',
-        reply_markup: {
-          ...MAIN_MENU_KEYBOARD,
-          inline_keyboard: inlineKeyboardButtons,
-        },
+        reply_markup: { ...MAIN_MENU_KEYBOARD, inline_keyboard: inlineKeyboardButtons },
       });
       return;
     }
 
-    // Handle /alerts
+    // ── /alerts ──────────────────────────────────────────────────────────
     if (command === '/alerts') {
       const logs = await TelegramAlertLog.find({ chatId }).sort({ sentAt: -1 }).limit(8).lean();
       if (logs.length === 0) {
-        await this.sendMessage(chatId, 'ℹ️ No recent alert notifications logged for your account.', {
-          parse_mode: 'HTML',
-          reply_markup: MAIN_MENU_KEYBOARD,
-        });
+        await this.sendMessage(chatId, 'ℹ️ No recent alert notifications logged for your account.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
         return;
       }
       let logMsg = `📜 <b>Recent Alert Notifications (${logs.length}):</b>\n\n`;
@@ -562,104 +630,88 @@ class TelegramBotService {
         logMsg += `• <b>${l.alertType}</b> — ${l.symbol} (${new Date(l.sentAt).toLocaleTimeString()} UTC)\n` +
           `  <i>${l.stage} — Status: ${l.deliveryStatus}</i>\n\n`;
       }
-      await this.sendMessage(chatId, logMsg, {
-        parse_mode: 'HTML',
-        reply_markup: MAIN_MENU_KEYBOARD,
-      });
+      await this.sendMessage(chatId, logMsg, { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
-    // Fallback response for unhandled text
-    await this.sendMessage(chatId, `ℹ️ Command not recognized. Use the menu buttons below or type <code>/help</code>.`, {
-      parse_mode: 'HTML',
-      reply_markup: MAIN_MENU_KEYBOARD,
-    });
+    // Fallback
+    await this.sendMessage(chatId,
+      `ℹ️ Command not recognized. Use the menu buttons below or type <code>/help</code>.`,
+      { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD }
+    );
   }
 
-  /**
-   * Handle secure pairing code handshake
-   */
-  private async handleConnectCode(
-    chatId: number,
-    code: string,
-    telegramUsername: string,
-    firstName: string
-  ): Promise<void> {
-    const now = new Date();
-    const user = await TelegramUser.findOne({
-      connectionCode: code,
-      codeExpiresAt: { $gt: now },
-    });
+  // ─────────────────────────────────────────────────────────────────────────
+  // CALLBACK QUERY HANDLER — Auth check at ENTRY, before any data access
+  // ─────────────────────────────────────────────────────────────────────────
 
-    if (!user) {
-      await this.sendMessage(
-        chatId,
-        `❌ <b>Invalid or Expired Connection Code</b>\n\nPlease generate a fresh code on the website and try again:\n<code>/connect YOUR_CODE</code>`,
-        { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD }
+  private async handleCallbackQuery(cb: any): Promise<void> {
+    const chatId: number = cb.message?.chat?.id;
+    const telegramUserId: number = cb.from?.id;
+    const data: string = cb.data;
+    if (!chatId || !data) return;
+
+    // Acknowledge the callback (prevents Telegram "loading" spinner)
+    try {
+      await fetch(`https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: cb.id }),
+      });
+    } catch { /* non-critical */ }
+
+    // ── UNAUTHENTICATED CALLBACKS (safe to handle without auth) ──────────
+    if (data === 'cmd_how_to_connect') {
+      await this.sendMessage(chatId,
+        `🌐 <b>How to Connect:</b>\n\n` +
+        `1. Open the web dashboard: <code>${config.frontendOrigin}</code>\n` +
+        `2. Click <b>Telegram</b> → <b>Generate Connection Code</b>\n` +
+        `3. Copy the 6-digit code\n` +
+        `4. Return here and send the code as a plain message\n\n` +
+        `<i>Codes expire in 10 minutes and are single-use.</i>`,
+        { parse_mode: 'HTML' }
       );
       return;
     }
 
-    // Successfully link Telegram Chat ID
-    user.chatId = chatId;
-    user.telegramUsername = telegramUsername;
-    user.firstName = firstName;
-    user.isConnected = true;
-    user.connectedAt = now;
-    user.lastActiveAt = now;
-    user.connectionCode = undefined;
-    user.codeExpiresAt = undefined;
-    await user.save();
+    // ── AUTHENTICATION GUARD FOR ALL PROTECTED CALLBACKS ─────────────────
+    // Look up user by telegramUserId (authoritative), fallback to chatId
+    const user = telegramUserId
+      ? await TelegramUser.findOne({ telegramUserId })
+      : await TelegramUser.findOne({ chatId });
 
-    const successMsg = `🎉 <b>Account Successfully Connected!</b>\n\n` +
-      `👤 <b>User ID:</b> <code>${user.userId}</code>\n` +
-      `📡 <b>Active Watchlist:</b> ${user.watchlist.join(', ')}\n` +
-      `⚡ <b>Alerts:</b> 🟢 Enabled (High-Quality Setups Only)\n\n` +
-      `You will now receive real-time structural intelligence alerts directly in this chat.`;
+    if (!this.isUserAuthenticated(user)) {
+      const firstName = cb.from?.first_name || 'Trader';
+      await this.sendMessage(chatId,
+        `🔐 <b>Authentication Required</b>\n\nSend /start to begin a new verification session, then enter your code from the web dashboard.`,
+        { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+      );
+      return;
+    }
 
-    await this.sendMessage(chatId, successMsg, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        ...MAIN_MENU_KEYBOARD,
-        inline_keyboard: [
-          [
-            { text: '🎯 Active Setups', callback_data: 'cmd_setups' },
-            { text: '📡 Watchlist', callback_data: 'cmd_watchlist' },
-          ],
-        ],
-      },
-    });
-  }
+    // Authenticated: touch session
+    await this.touchSession(user!);
 
-  /**
-   * Handle inline button callbacks (including setup detail inspection)
-   */
-  private async handleCallbackQuery(cb: any): Promise<void> {
-    const chatId = cb.message?.chat?.id;
-    const data = cb.data;
-    if (!chatId || !data) return;
-
-    if (data === 'cmd_request_code') {
-      const user = await TelegramUser.findOne({ chatId });
-      if (user) {
-        await this.handleRequestVerificationCode(chatId, user);
-      }
-    } else if (data === 'action_stop') {
-      await TelegramUser.updateOne({ chatId }, { $set: { 'settings.isMuted': true } });
+    // ── PROTECTED CALLBACKS ──────────────────────────────────────────────
+    if (data === 'action_stop') {
+      await TelegramUser.updateOne({ _id: user!._id }, { $set: { 'settings.isMuted': true } });
       await this.sendMessage(chatId, '🔕 Alerts Paused. Use /resume to reactivate.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
     } else if (data === 'action_resume') {
-      await TelegramUser.updateOne({ chatId }, { $set: { 'settings.isMuted': false } });
+      await TelegramUser.updateOne({ _id: user!._id }, { $set: { 'settings.isMuted': false } });
       await this.sendMessage(chatId, '🔔 Alerts Resumed.', { parse_mode: 'HTML', reply_markup: MAIN_MENU_KEYBOARD });
     } else if (data === 'cmd_setups') {
-      await this.handleIncomingMessage({ chat: { id: chatId }, text: '/setups' });
+      await this.handleIncomingMessage({ chat: { id: chatId }, from: cb.from, text: '/setups' });
     } else if (data === 'cmd_watchlist') {
-      await this.handleIncomingMessage({ chat: { id: chatId }, text: '/watchlist' });
+      await this.handleIncomingMessage({ chat: { id: chatId }, from: cb.from, text: '/watchlist' });
     } else if (data === 'cmd_settings') {
-      await this.handleIncomingMessage({ chat: { id: chatId }, text: '/settings' });
+      await this.handleIncomingMessage({ chat: { id: chatId }, from: cb.from, text: '/settings' });
     } else if (data === 'cmd_status') {
-      await this.handleIncomingMessage({ chat: { id: chatId }, text: '/status' });
+      await this.handleIncomingMessage({ chat: { id: chatId }, from: cb.from, text: '/status' });
     } else if (data === 'cmd_terminal_info') {
-      await this.sendMessage(chatId, `🌐 <b>SMC Market Analyzer Web Terminal:</b>\n<code>${config.frontendOrigin}</code>`, { parse_mode: 'HTML' });
+      await this.sendMessage(chatId,
+        `🌐 <b>SMC Market Analyzer Web Terminal:</b>\n<code>${config.frontendOrigin}</code>`,
+        { parse_mode: 'HTML' }
+      );
     } else if (data.startsWith('view_setup_')) {
       const analysisId = data.replace('view_setup_', '');
       const d = await activeSetupService.getSetupDetails(analysisId);
@@ -671,29 +723,28 @@ class TelegramBotService {
 
       const isBull = d.direction === 'BULLISH';
       const icon = isBull ? '🟢' : '🔴';
-
       const evidenceList = d.evidenceChecklist
-        .map(e => `${e.passed ? '✓' : '✗'} <b>${escapeHtml(e.label)}:</b> ${escapeHtml(e.note)}`)
+        .map((e: any) => `${e.passed ? '✓' : '✗'} <b>${escapeHtml(e.label)}:</b> ${escapeHtml(e.note)}`)
         .join('\n');
 
-      const detailMsg = `📊 <b>${icon} ${escapeHtml(d.symbol)} — ${d.direction} SETUP DETAILS</b>\n` +
+      const detailMsg =
+        `📊 <b>${icon} ${escapeHtml(d.symbol)} — ${d.direction} SETUP DETAILS</b>\n` +
         `<code>Setup ID: ${d.analysisId}</code>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `🎯 <b>SETUP MODEL:</b>\n` +
-        `<code>${escapeHtml(d.setupModel)}</code>\n\n` +
-        `⚡ <b>TRIGGER:</b>\n` +
-        `<i>${escapeHtml(d.trigger)}</i>\n\n` +
-        `💡 <b>WHY THIS SETUP EXISTS:</b>\n` +
-        `${escapeHtml(d.whyOccurred)}\n\n` +
+        `🎯 <b>SETUP MODEL:</b>\n<code>${escapeHtml(d.setupModel)}</code>\n\n` +
+        `⚡ <b>TRIGGER:</b>\n<i>${escapeHtml(d.trigger)}</i>\n\n` +
+        `💡 <b>WHY THIS SETUP EXISTS:</b>\n${escapeHtml(d.whyOccurred)}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🧠 <b>STRUCTURAL EVIDENCE CHECKLIST:</b>\n` +
-        `${evidenceList}\n\n` +
+        `🧠 <b>STRUCTURAL EVIDENCE CHECKLIST:</b>\n${evidenceList}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `🎯 <b>ENTRY ZONE:</b> <code>${d.entryPrice}</code>\n` +
         `<i>${escapeHtml(d.entryReason)}</i>\n\n` +
         `🛑 <b>INVALIDATION:</b> <code>${d.invalidationPrice}</code>\n` +
         `<i>${escapeHtml(d.invalidationReason)}</i>\n\n` +
-        `🎯 <b>TARGET:</b> <code>${d.targetPrice}</code> (<b>${d.riskRewardRatio}R</b>)\n` +
+        `🎯 <b>TAKE PROFITS:</b>\n` +
+        (d.takeProfit1 != null ? `• <b>TP1</b> (Partial): <code>${d.takeProfit1}</code>\n` : '') +
+        `• <b>TP2</b> (Primary): <code>${d.targetPrice}</code> (<b>${d.riskRewardRatio}R</b>)\n` +
+        (d.takeProfit3 != null ? `• <b>TP3</b> (Runner): <code>${d.takeProfit3}</code>\n` : '') +
         `<i>${escapeHtml(d.targetReason)}</i>\n\n` +
         `📡 <b>CURRENT MONITORING:</b>\n` +
         `• <b>Status:</b> ${escapeHtml(d.currentMonitoringState.monitoringStatus)}\n` +
@@ -702,127 +753,204 @@ class TelegramBotService {
       await this.sendMessage(chatId, detailMsg, {
         parse_mode: 'HTML',
         reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '◀ Back to Active Setups', callback_data: 'cmd_setups' },
-            ],
-          ],
+          inline_keyboard: [[{ text: '◀ Back to Active Setups', callback_data: 'cmd_setups' }]],
         },
       });
     }
   }
 
-  /**
-   * Generates a cryptographically secure 6-digit verification code with 10m expiry & rate limiting
-   */
-  public async handleRequestVerificationCode(chatId: number, user: any): Promise<void> {
+  // ─────────────────────────────────────────────────────────────────────────
+  // CONNECT CODE HANDLER — Called after /start <code> deep link
+  // Validates the website-generated connectionCode and creates a session
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private async handleConnectCode(
+    chatId: number,
+    user: any,
+    code: string,
+    telegramUsername: string,
+    firstName: string,
+    telegramUserId?: number
+  ): Promise<void> {
     const now = new Date();
-    // Rate limit: 45 seconds cooldown
-    if (user.lastCodeRequestedAt) {
-      const elapsedMs = now.getTime() - new Date(user.lastCodeRequestedAt).getTime();
-      if (elapsedMs < 45000) {
-        const waitSec = Math.ceil((45000 - elapsedMs) / 1000);
-        await this.sendMessage(chatId, `⏳ <b>Please wait ${waitSec}s</b> before requesting a new verification code.`, { parse_mode: 'HTML' });
+    const codeUpper = code.toUpperCase().trim();
+
+    // Find web account record that has this code pending
+    const codeOwner = await TelegramUser.findOne({
+      connectionCode: codeUpper,
+      codeExpiresAt: { $gt: now },
+    });
+
+    if (!codeOwner) {
+      await this.sendMessage(chatId,
+        `❌ <b>Invalid or Expired Code</b>\n\nThis connection code is not valid or has expired.\n\nPlease generate a fresh code from the web dashboard and try again.`,
+        { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+      );
+      return;
+    }
+
+    // Link Telegram identity to the web account record
+    codeOwner.telegramUserId = telegramUserId || undefined;
+    codeOwner.chatId = chatId;
+    codeOwner.telegramUsername = telegramUsername;
+    codeOwner.firstName = firstName;
+    codeOwner.isConnected = true;
+    codeOwner.connectedAt = now;
+    codeOwner.connectionCode = undefined; // Single-use: consumed
+    codeOwner.codeExpiresAt = undefined;
+    codeOwner.failedAuthAttempts = 0;
+    codeOwner.codeLockedUntil = undefined;
+
+    // Remove temporary or duplicate user doc BEFORE saving codeOwner to avoid unique index violation on telegramUserId
+    const targetTgId = telegramUserId || undefined;
+    if (targetTgId) {
+      await TelegramUser.deleteMany({
+        _id: { $ne: codeOwner._id },
+        $or: [{ telegramUserId: targetTgId }, { chatId }],
+      });
+    } else if (user && user.id !== codeOwner.id && user.userId.startsWith('tg_')) {
+      try { await user.deleteOne(); } catch { /* ignore */ }
+    }
+
+    // Create authenticated session
+    await this.createSession(codeOwner, now);
+
+    console.log(`[TelegramBot] Telegram user ${telegramUserId} authenticated via code. Session created.`);
+
+    const successMsg =
+      `✅ <b>AUTHENTICATION SUCCESSFUL — ACCESS GRANTED</b>\n\n` +
+      `Welcome to the <b>SMC Institutional Signal Engine</b>, <b>${escapeHtml(firstName)}</b>!\n\n` +
+      `⚡ <b>Privileges Unlocked:</b>\n` +
+      `• Real-Time Grade A/A+ Trade Setup Alerts\n` +
+      `• Automatic Entry Approaching &amp; Trigger Notifications\n` +
+      `• Live Target Hit &amp; Invalidation Updates\n` +
+      `• Complete Structural Evidence Inspections\n\n` +
+      `<b>Active Watchlist:</b> ${codeOwner.watchlist.join(', ')}\n\n` +
+      `Use the menu below to explore active setups:`;
+
+    await this.sendMessage(chatId, successMsg, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        ...MAIN_MENU_KEYBOARD,
+        inline_keyboard: [
+          [{ text: '🎯 Active Setups', callback_data: 'cmd_setups' }, { text: '📡 Watchlist', callback_data: 'cmd_watchlist' }],
+        ],
+      },
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // VERIFY CODE — For raw 5/6-digit text input after /start
+  // ─────────────────────────────────────────────────────────────────────────
+
+  public async handleVerifyCode(chatId: number, user: any, codeInput?: string, telegramUserId?: number): Promise<void> {
+    if (!codeInput || !/^\d{5,6}$/.test(codeInput.trim())) {
+      await this.sendMessage(chatId,
+        `⚠️ Please send your 5 or 6-digit verification code as a plain message.\n\nGenerate a code from the web dashboard first.`,
+        { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+      );
+      return;
+    }
+
+    const now = new Date();
+
+    // ── Lockout check ───────────────────────────────────────────────────
+    if (user.codeLockedUntil && now < new Date(user.codeLockedUntil)) {
+      const waitMin = Math.ceil((new Date(user.codeLockedUntil).getTime() - now.getTime()) / 60000);
+      await this.sendMessage(chatId,
+        `🔒 <b>Too Many Failed Attempts</b>\n\nYour account is temporarily locked. Please wait <b>${waitMin} minute(s)</b> before trying again.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Look for a web account record with this connection code
+    const codeUpper = codeInput.trim().toUpperCase();
+    const codeOwner = await TelegramUser.findOne({
+      connectionCode: codeUpper,
+      codeExpiresAt: { $gt: now },
+    });
+
+    if (!codeOwner) {
+      // Check if code exists but expired (give better error message)
+      const expiredRecord = await TelegramUser.findOne({ connectionCode: codeUpper });
+      if (expiredRecord) {
+        await this.sendMessage(chatId,
+          `⌛ <b>Code Expired</b>\n\nThis verification code has expired (10-minute limit).\nPlease generate a new code from the web dashboard.`,
+          { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+        );
         return;
       }
-    }
 
-    // Cryptographically secure 6-digit random code
-    const code = String(crypto.randomInt(100000, 1000000));
-    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+      // Invalid code: increment failure counter
+      user.failedAuthAttempts = (user.failedAuthAttempts || 0) + 1;
+      user.lastFailedAuthAt = now;
 
-    user.verificationCodeHash = codeHash;
-    user.verificationExpiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
-    user.verificationAttempts = 0;
-    user.lastCodeRequestedAt = now;
-    await user.save();
+      const hashPrefix = `${codeUpper.slice(0, 4)}**`;
+      user.verificationHistory = [
+        ...(user.verificationHistory || []).slice(-9),
+        { timestamp: now, success: false, codeHashPrefix: hashPrefix },
+      ];
 
-    const codeMsg = `🔑 <b>YOUR 6-DIGIT VERIFICATION CODE:</b>\n\n` +
-      `<code>${code}</code>\n\n` +
-      `⏳ <b>Expires in:</b> 10 minutes\n` +
-      `🔒 <b>Account-Bound:</b> Cryptographically tied to Telegram ID <code>${chatId}</code>\n\n` +
-      `To unlock private signals and active setups, reply with this 6-digit code or type:\n` +
-      `<code>/verify ${code}</code>`;
+      if (user.failedAuthAttempts >= MAX_CODE_ATTEMPTS) {
+        user.codeLockedUntil = new Date(now.getTime() + LOCKOUT_DURATION_MS);
+        await user.save();
+        await this.sendMessage(chatId,
+          `❌ <b>Too Many Failed Attempts</b>\n\nYour account has been temporarily locked for 15 minutes.\nGenerate a new code from the web dashboard after the lockout expires.`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
 
-    await this.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' });
-  }
-
-  /**
-   * Verifies submitted 6-digit code against SHA-256 hash
-   */
-  public async handleVerifyCode(chatId: number, user: any, codeInput?: string): Promise<void> {
-    if (!codeInput) {
-      await this.sendMessage(chatId, `⚠️ Please provide your 6-digit code.\nExample: <code>/verify 583214</code>`, { parse_mode: 'HTML' });
-      return;
-    }
-
-    const code = codeInput.trim();
-    if (!/^\d{6}$/.test(code)) {
-      await this.sendMessage(chatId, `❌ Verification code must be exactly 6 digits.`, { parse_mode: 'HTML' });
-      return;
-    }
-
-    if (!user.verificationCodeHash || !user.verificationExpiresAt) {
-      await this.sendMessage(chatId, `❌ No active verification request found. Click below to request a code:`, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
-        },
-      });
-      return;
-    }
-
-    const now = new Date();
-    if (now > new Date(user.verificationExpiresAt)) {
-      user.verificationCodeHash = undefined;
-      user.verificationExpiresAt = undefined;
+      const remaining = MAX_CODE_ATTEMPTS - user.failedAuthAttempts;
       await user.save();
-      await this.sendMessage(chatId, `❌ <b>Verification Code Expired (10 min limit)</b>\n\nPlease request a new verification code:`, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
-        },
-      });
+      await this.sendMessage(chatId,
+        `❌ <b>Invalid Verification Code</b>\n\nThis code is not valid. Please check the code from your web dashboard.\n\n<i>${remaining} attempt(s) remaining before temporary lockout.</i>`,
+        { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+      );
       return;
     }
 
-    if (user.verificationAttempts >= 5) {
-      user.verificationCodeHash = undefined;
-      user.verificationExpiresAt = undefined;
-      await user.save();
-      await this.sendMessage(chatId, `❌ <b>Too many failed attempts</b>. Please request a new verification code:`, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔑 Request Verification Code', callback_data: 'cmd_request_code' }]],
-        },
+    // Valid code found: link and authenticate
+    codeOwner.telegramUserId = telegramUserId || user.telegramUserId;
+    codeOwner.chatId = chatId;
+    codeOwner.telegramUsername = user.telegramUsername;
+    codeOwner.firstName = user.firstName;
+    codeOwner.isConnected = true;
+    codeOwner.connectedAt = now;
+    codeOwner.connectionCode = undefined; // Single-use: consumed immediately
+    codeOwner.codeExpiresAt = undefined;
+    codeOwner.failedAuthAttempts = 0;
+    codeOwner.codeLockedUntil = undefined;
+
+    const hashPrefix = `${codeUpper.slice(0, 4)}**`;
+    codeOwner.verificationHistory = [
+      ...(codeOwner.verificationHistory || []).slice(-9),
+      { timestamp: now, success: true, codeHashPrefix: hashPrefix },
+    ];
+
+    // Remove temporary or duplicate user doc BEFORE saving codeOwner to avoid unique index violation on telegramUserId
+    const targetTgId = telegramUserId || user?.telegramUserId;
+    if (targetTgId) {
+      await TelegramUser.deleteMany({
+        _id: { $ne: codeOwner._id },
+        $or: [{ telegramUserId: targetTgId }, { chatId }],
       });
-      return;
+    } else if (user && user.id !== codeOwner.id && user.userId.startsWith('tg_')) {
+      try { await user.deleteOne(); } catch { /* ignore */ }
     }
 
-    const submittedHash = crypto.createHash('sha256').update(code).digest('hex');
-    if (submittedHash !== user.verificationCodeHash) {
-      user.verificationAttempts = (user.verificationAttempts || 0) + 1;
-      await user.save();
-      await this.sendMessage(chatId, `❌ <b>Invalid verification code</b> (Attempt ${user.verificationAttempts} of 5). Please re-enter the correct 6-digit code.`, {
-        parse_mode: 'HTML',
-      });
-      return;
-    }
+    await this.createSession(codeOwner, now);
 
-    // Success: Authorize user and consume code (one-time use!)
-    user.isAuthorized = true;
-    user.authorizedAt = now;
-    user.verificationCodeHash = undefined;
-    user.verificationExpiresAt = undefined;
-    user.verificationAttempts = 0;
-    await user.save();
+    console.log(`[TelegramBot] Telegram user ${telegramUserId} authenticated via code input. Session created.`);
 
-    const successMsg = `✅ <b>VERIFICATION SUCCESSFUL — ACCESS GRANTED</b>\n\n` +
+    const successMsg =
+      `✅ <b>VERIFICATION SUCCESSFUL — ACCESS GRANTED</b>\n\n` +
       `Welcome to the <b>SMC Institutional Signal Engine</b>!\n\n` +
       `⚡ <b>Privileges Unlocked:</b>\n` +
       `• Real-Time Grade A/A+ Trade Setup Alerts\n` +
-      `• Automatic Entry Approaching & Trigger Notifications\n` +
-      `• Live Target Hit & Invalidation Updates\n` +
+      `• Automatic Entry Approaching &amp; Trigger Notifications\n` +
+      `• Live Target Hit &amp; Invalidation Updates\n` +
       `• Complete Structural Evidence Inspections\n\n` +
       `Use the menu below to explore active setups:`;
 
@@ -835,6 +963,21 @@ class TelegramBotService {
         ],
       },
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PUBLIC: Kept for backward compatibility with handleRequestVerificationCode
+  // calls from old code paths — now returns an error since codes are website-only
+  // ─────────────────────────────────────────────────────────────────────────
+  public async handleRequestVerificationCode(chatId: number, _user: any): Promise<void> {
+    await this.sendMessage(chatId,
+      `🌐 <b>Verification Codes Are Generated on the Web Dashboard</b>\n\n` +
+      `For security, codes can only be generated from the authenticated web interface.\n\n` +
+      `Open: <code>${config.frontendOrigin}</code>\n` +
+      `Navigate to <b>Telegram → Generate Code</b>\n` +
+      `Then enter the code here.`,
+      { parse_mode: 'HTML', reply_markup: AUTH_GATE_KEYBOARD }
+    );
   }
 }
 

@@ -23,7 +23,10 @@ export interface SetupExplanationDetails {
   currentPrice: number;
   entryPrice: number;
   stopLossPrice: number;
-  targetPrice: number;
+  targetPrice: number;    // TP2 = canonical lifecycle target
+  takeProfit1?: number;  // Internal partial TP
+  takeProfit2?: number;  // Alias for targetPrice
+  takeProfit3?: number;  // Runner target
   invalidationPrice: number;
   riskRewardRatio: number;
   status: string;
@@ -140,7 +143,15 @@ class ActiveSetupService {
     const invalidationReason = isBull
       ? `Bullish thesis invalidated if candle closes below structural swing low at ${a.invalidationPrice.toFixed(decimals)}.`
       : `Bearish thesis invalidated if candle closes above structural swing high at ${a.invalidationPrice.toFixed(decimals)}.`;
-    const targetReason = `Target price of ${a.targetPrice.toFixed(decimals)} (${a.riskRewardRatio}R) is positioned at the opposing major liquidity pool and dealing range boundary.`;
+    const tp1 = a.takeProfit1;
+    const tp2 = a.takeProfit2 || a.targetPrice;
+    const tp3 = a.takeProfit3;
+    const tpSummary = [
+      tp1 != null ? `TP1 ${a.targetPrice.toFixed(decimals)}` : null,  // tp1 placeholder if no tp1
+      `TP2 ${tp2.toFixed(decimals)}`,
+      tp3 != null ? `TP3 ${tp3.toFixed(decimals)}` : null,
+    ].filter(Boolean).join(' / ');
+    const targetReason = `Targets: ${tpSummary} (${a.riskRewardRatio}R to TP2) positioned at opposing liquidity pools and dealing range boundaries.`;
 
     return {
       analysisId: a.analysisId,
@@ -153,6 +164,9 @@ class ActiveSetupService {
       entryPrice: a.entryPrice,
       stopLossPrice: a.stopLossPrice,
       targetPrice: a.targetPrice,
+      takeProfit1: a.takeProfit1,
+      takeProfit2: a.takeProfit2 || a.targetPrice,
+      takeProfit3: a.takeProfit3,
       invalidationPrice: a.invalidationPrice,
       riskRewardRatio: a.riskRewardRatio,
       status: a.outcome?.status || 'OPEN',

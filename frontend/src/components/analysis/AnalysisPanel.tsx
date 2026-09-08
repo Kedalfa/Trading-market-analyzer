@@ -36,6 +36,10 @@ export function AnalysisPanel({
     setTimeout(() => setSavedSuccess(false), 2500);
   };
 
+  // Instrument-aware price decimal places: JPY = 3, standard forex = 5, non-forex = 2
+  const priceDp = instrument.assetClass !== 'forex' ? 2
+    : ((instrument.symbol || instrument.id || '').toUpperCase().includes('JPY') ? 3 : 5);
+
   return (
     <div className="flex flex-col h-full w-full bg-[#0b101d] rounded-xl border border-[#1e293b] overflow-y-auto">
       {/* Panel Header */}
@@ -191,7 +195,7 @@ export function AnalysisPanel({
                 <div key={idx} className="flex items-center justify-between p-1.5 rounded bg-slate-900/60 border border-slate-800 text-[11px]">
                   <span className="text-slate-400">{t.label}</span>
                   <span className="font-mono font-bold text-white">
-                    {t.price.toFixed(instrument.assetClass === 'forex' ? 5 : 2)}
+                    {t.price.toFixed(priceDp)}
                   </span>
                 </div>
               ))}
@@ -235,7 +239,7 @@ export function AnalysisPanel({
                   <ArrowUpRight className="w-3.5 h-3.5" /> Nearest Buy-Side (BSL)
                 </span>
                 <span className="font-mono font-bold text-white">
-                  {analysis.liquidityMap.nearestBuyside.price.toFixed(instrument.assetClass === 'forex' ? 5 : 2)}
+                  {analysis.liquidityMap.nearestBuyside.price.toFixed(priceDp)}
                 </span>
               </div>
             )}
@@ -246,7 +250,7 @@ export function AnalysisPanel({
                   <ArrowDownRight className="w-3.5 h-3.5" /> Nearest Sell-Side (SSL)
                 </span>
                 <span className="font-mono font-bold text-white">
-                  {analysis.liquidityMap.nearestSellside.price.toFixed(instrument.assetClass === 'forex' ? 5 : 2)}
+                  {analysis.liquidityMap.nearestSellside.price.toFixed(priceDp)}
                 </span>
               </div>
             )}

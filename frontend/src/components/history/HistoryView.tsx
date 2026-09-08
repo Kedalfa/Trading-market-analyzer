@@ -6,7 +6,7 @@ import { SetupDetailModal } from './SetupDetailModal';
 import {
   History, CheckCircle2, Trash2, ArrowUpRight, ArrowDownRight,
   RefreshCw, Target, XCircle, AlertCircle, TrendingUp,
-  Clock, Shield, Award, ChevronDown, ChevronUp, Zap, Radio,
+  Clock, Shield, Award, ChevronDown, ChevronUp, Radio,
   Sparkles, Download, FileText, Calendar, Search, Filter,
   ChevronLeft, ChevronRight, BarChart2, PieChart, Activity
 } from 'lucide-react';
@@ -30,6 +30,9 @@ interface SavedAnalysis {
   entryPrice: number;
   stopLossPrice: number;
   targetPrice: number;
+  takeProfit1?: number;
+  takeProfit2?: number;
+  takeProfit3?: number;
   invalidationPrice: number;
   riskRewardRatio: number;
   rulesetUsed: string;
@@ -85,7 +88,6 @@ export function HistoryView() {
   const [summaryStats, setSummaryStats] = useState<SummaryStats | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
-  const [isEvaluating, setIsEvaluating] = useState(false);
 
   // Filter states
   const [filterDirection, setFilterDirection] = useState<'ALL' | 'BULLISH' | 'BEARISH'>('ALL');
@@ -195,20 +197,6 @@ export function HistoryView() {
     setPage(1);
   };
 
-  // Trigger server-side background evaluation immediately
-  const handleEvaluateNow = async () => {
-    setIsEvaluating(true);
-    try {
-      const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
-      await fetch(`${baseUrl}/api/analyses/evaluate-now`, { method: 'POST' });
-      await loadAnalyses();
-    } catch (err) {
-      console.error('[HistoryView] Evaluate now failed:', err);
-    } finally {
-      setIsEvaluating(false);
-    }
-  };
-
   const handleDelete = async (analysisId: string) => {
     if (!confirm('Delete this saved analysis record from MongoDB?')) return;
     try {
@@ -244,13 +232,20 @@ export function HistoryView() {
   const renderStatusBadge = (outcome: SavedAnalysis['outcome']) => {
     const s = outcome?.status || 'OPEN';
 
-    if (outcome?.isApproachingEntry || s === 'APPROACHING_ENTRY') {
-      return (
-        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-amber-950 text-amber-300 border border-amber-400/60 shadow-md shadow-amber-950/60 animate-pulse">
-          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping inline-block" />
-          ⚠️ APPROACHING ENTRY
-        </span>
-      );
+    // TERMINAL STATES ALWAYS WIN — a terminal record must never display a pre-terminal badge
+    // regardless of stale flags like isApproachingEntry left over from a prior sub-state.
+    const TERMINAL_STATUSES = new Set(['TARGET_HIT', 'STOPPED_OUT', 'INVALIDATED', 'EXPIRED', 'AMBIGUOUS']);
+
+    if (!TERMINAL_STATUSES.has(s)) {
+      // Only show APPROACHING ENTRY badge for genuinely non-terminal records
+      if (outcome?.isApproachingEntry || s === 'APPROACHING_ENTRY') {
+        return (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-amber-950 text-amber-300 border border-amber-400/60 shadow-md shadow-amber-950/60 animate-pulse">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping inline-block" />
+            ⚠️ APPROACHING ENTRY
+          </span>
+        );
+      }
     }
 
     switch (s) {
@@ -524,17 +519,6 @@ export function HistoryView() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Evaluate Now */}
-          <button
-            onClick={handleEvaluateNow}
-            disabled={isEvaluating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all"
-            title="Trigger immediate background market data check for all OPEN & ACTIVE analyses"
-          >
-            <Zap className={`w-3.5 h-3.5 ${isEvaluating ? 'animate-spin' : ''}`} />
-            {isEvaluating ? 'Checking Feeds…' : 'Evaluate Open Setups'}
-          </button>
-
           {/* Export CSV Report */}
           <button
             onClick={handleDownloadCsv}
@@ -761,10 +745,34 @@ export function HistoryView() {
                       <span className="text-slate-400 text-[10px] block">Stop Loss</span>
                       <strong className="text-rose-400 font-mono">{analysis.stopLossPrice}</strong>
                     </div>
-                    <div className="p-2 rounded bg-[#0e1628] border border-slate-800">
-                      <span className="text-slate-400 text-[10px] block">Target (TP)</span>
-                      <strong className="text-emerald-400 font-mono">{analysis.targetPrice}</strong>
-                    </div>
+
+                    {/* Multi-TP display — spans remaining columns */}
+                    {(analysis.takeProfit1 || analysis.takeProfit2 || analysis.takeProfit3) ? (
+                      <div className="col-span-2 grid grid-cols-1 gap-1">
+                        {analysis.takeProfit1 && (
+                          <div className="p-1.5 rounded bg-[#0e1628] border border-emerald-900/40 flex items-center justify-between">
+                            <span className="text-slate-400 text-[10px]">TP1 <span className="text-slate-600">(Partial)</span></span>
+                            <strong className="text-emerald-300 font-mono text-xs">{analysis.takeProfit1}</strong>
+                          </div>
+                        )}
+                        <div className="p-1.5 rounded bg-[#0e1628] border border-emerald-600/40 flex items-center justify-between">
+                          <span className="text-slate-400 text-[10px]">TP2 <span className="text-slate-600">(Primary)</span></span>
+                          <strong className="text-emerald-400 font-mono text-xs">{analysis.takeProfit2 ?? analysis.targetPrice}</strong>
+                        </div>
+                        {analysis.takeProfit3 && (
+                          <div className="p-1.5 rounded bg-[#0e1628] border border-emerald-400/30 flex items-center justify-between">
+                            <span className="text-slate-400 text-[10px]">TP3 <span className="text-slate-600">(Runner)</span></span>
+                            <strong className="text-emerald-200 font-mono text-xs">{analysis.takeProfit3}</strong>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="p-2 rounded bg-[#0e1628] border border-slate-800">
+                        <span className="text-slate-400 text-[10px] block">Target (TP)</span>
+                        <strong className="text-emerald-400 font-mono">{analysis.targetPrice}</strong>
+                      </div>
+                    )}
+
                     <div className="p-2 rounded bg-[#0e1628] border border-slate-800">
                       <span className="text-slate-400 text-[10px] block">R:R Ratio</span>
                       <strong className="text-purple-300 font-mono">{analysis.riskRewardRatio}R</strong>

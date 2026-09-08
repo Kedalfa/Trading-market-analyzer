@@ -16,6 +16,7 @@ export interface SMCTradeExecutionRequest {
   stopLoss: number;
   takeProfit1: number;
   takeProfit2?: number;
+  takeProfit3?: number;
   riskPercent?: number; // Defaults to config.exness.maxRiskPercent (1.0%)
   orderType?: 'MARKET' | 'LIMIT' | 'STOP' | 'AUTO';
   comment?: string;

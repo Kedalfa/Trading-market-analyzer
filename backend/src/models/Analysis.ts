@@ -43,6 +43,8 @@ export interface IAnalysisOutcome {
   maxAdverseExcursion?: number;
   notes?: string;
   lastMonitoredAt?: Date;
+  lastProcessedBarTimestamp?: number;
+  isRecoveredState?: boolean;
   monitoringStatus?: string;
   auditTrail: IAuditEntry[];
 }
@@ -59,7 +61,10 @@ export interface IAnalysis extends Document {
   direction: 'BULLISH' | 'BEARISH';
   entryPrice: number;
   stopLossPrice: number;
-  targetPrice: number;
+  targetPrice: number;      // Canonical TP2 (prime structural target, used for lifecycle monitoring)
+  takeProfit1?: number;     // Internal / partial TP level
+  takeProfit2?: number;     // Alias for targetPrice (primary draw)
+  takeProfit3?: number;     // Extended runner target (if available)
   invalidationPrice: number;
   riskRewardRatio: number;
   htfBias: 'BULLISH' | 'BEARISH' | 'RANGING';
@@ -94,6 +99,9 @@ const analysisSchema = new Schema<IAnalysis>(
     entryPrice: { type: Number, required: true },
     stopLossPrice: { type: Number, required: true },
     targetPrice: { type: Number, required: true },
+    takeProfit1: { type: Number },
+    takeProfit2: { type: Number },
+    takeProfit3: { type: Number },
     invalidationPrice: { type: Number, required: true },
     riskRewardRatio: { type: Number, default: 2.0 },
     htfBias: { type: String, enum: ['BULLISH', 'BEARISH', 'RANGING'], required: true },
@@ -136,6 +144,8 @@ const analysisSchema = new Schema<IAnalysis>(
       maxAdverseExcursion: Number,
       notes: String,
       lastMonitoredAt: Date,
+      lastProcessedBarTimestamp: Number,
+      isRecoveredState: { type: Boolean, default: false },
       monitoringStatus: String,
       auditTrail: [auditEntrySchema],
     },

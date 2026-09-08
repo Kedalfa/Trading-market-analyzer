@@ -201,6 +201,15 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
     const setupIndex = String(countToday + 1).padStart(2, '0');
     const setupId = `SMC-${instObj.symbol.replace('/', '')}-${dateStr}-${setupIndex}`;
 
+    // Extract all TP levels from potentialTargets BEFORE building scanDoc
+    // potentialTargets[0] = TP1 (internal liquidity / partial)
+    // potentialTargets[1] = TP2 (prime structural target = targetPrice)
+    // potentialTargets[2] = TP3 (extended runner, if available)
+    const tp1Price = scenario.potentialTargets[0]?.price;
+    const tp2Price = target2;  // already validated above
+    const tp3Price = scenario.potentialTargets[2]?.price;
+    const decimals = instObj.assetClass === 'forex' ? 5 : 2;
+
     // 1. Persist to MongoDB Analysis Collection (idempotent upsert — safe across concurrent cycles)
     try {
       const scanDoc = {
@@ -211,10 +220,13 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
         htfTimeframe: '4H',
         currentPrice: pipe.lastPrice,
         direction: isBull ? 'BULLISH' : 'BEARISH',
-        entryPrice: Number(entry.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-        stopLossPrice: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-        targetPrice: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-        invalidationPrice: Number(scenario.invalidationPrice.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+        entryPrice: Number(entry.toFixed(decimals)),
+        stopLossPrice: Number(stopLoss.toFixed(decimals)),
+        targetPrice: Number(tp2Price.toFixed(decimals)),          // TP2 = canonical lifecycle target
+        takeProfit1: tp1Price ? Number(tp1Price.toFixed(decimals)) : undefined,
+        takeProfit2: Number(tp2Price.toFixed(decimals)),           // matches targetPrice
+        takeProfit3: tp3Price ? Number(tp3Price.toFixed(decimals)) : undefined,
+        invalidationPrice: Number(scenario.invalidationPrice.toFixed(decimals)),
         riskRewardRatio: rr,
         rulesetUsed: 'standard_smc',
         htfBias: structAnalysis.marketOverview.htfBias,
@@ -263,8 +275,9 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
     }
 
     // 2. Dispatch formatted Telegram alert only AFTER successful authoritative persistence
-    const target1 = scenario.potentialTargets[0]?.price || target2;
-    const target3 = scenario.potentialTargets[2]?.price;
+    // Use the already-extracted target values (tp1Price, tp2Price, tp3Price)
+    const target1 = tp1Price || tp2Price;
+    const target3 = tp3Price;
 
     await telegramAlertDispatcher.dispatchNewSetupAlert({
       setupId,
@@ -292,8 +305,9 @@ export async function scanInstrumentForSetups(instrumentId: string, timeframe = 
           direction: isBull ? 'BULLISH' : 'BEARISH',
           entryPrice: Number(entry.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
           stopLoss: Number(stopLoss.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-          takeProfit1: Number(target1.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
-          takeProfit2: Number(target2.toFixed(instObj.assetClass === 'forex' ? 5 : 2)),
+          takeProfit1: Number(target1.toFixed(decimals)),
+          takeProfit2: Number(target2.toFixed(decimals)),
+          takeProfit3: target3 ? Number(target3.toFixed(decimals)) : undefined,
           riskPercent: config.exness.maxRiskPercent,
           comment: `SMC-${setupId.slice(-8)}`,
         });

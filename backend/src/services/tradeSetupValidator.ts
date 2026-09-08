@@ -45,6 +45,24 @@ export const DEACTIVATED_INSTRUMENTS = ['ETHUSDT', 'SOLUSDT'];
 /**
  * Validates a generated trade setup against strict SMC trading integrity rules.
  */
+
+/**
+ * Minimum risk distance (entry-to-SL spread) per instrument.
+ * If a setup has a smaller risk distance than this, it is categorically rejected
+ * regardless of calculated R:R — the risk is inside noise/spread territory.
+ */
+function getValidatorMinRisk(instrumentId: string): number {
+  const inst = instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
+  if (inst.includes('JPY'))  return 0.20;   // 20 JPY pips minimum
+  if (inst === 'EURUSD')     return 0.0015;  // 15 pips
+  if (inst === 'GBPUSD')     return 0.0018;  // 18 pips
+  if (inst === 'XAUUSD')     return 8.0;     // $8 gold minimum
+  if (inst.includes('BTC'))  return 300.0;   // $300 BTC minimum
+  if (inst === 'US500')      return 20.0;    // 20 index points
+  if (inst === 'NAS100')     return 70.0;    // 70 NAS points
+  return 0.0015;  // generic forex fallback
+}
+
 export function validateTradeSetup(setup: TradeSetupValidationInput): TradeSetupValidationResult {
   const now = new Date().toISOString();
   const instClean = setup.instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
@@ -182,8 +200,26 @@ export function validateTradeSetup(setup: TradeSetupValidationInput): TradeSetup
       };
     }
 
-    // 4. Exact Unrounded Risk-to-Reward Calculation
-    const rawRisk = entry - stop;
+    // 4. Minimum Risk Distance Sanity (before R:R calculation)
+    const minRisk = getValidatorMinRisk(setup.instrumentId);
+    const rawRiskBull = entry - stop;
+    if (rawRiskBull < minRisk) {
+      const reason = `SETUP_REJECTED: Risk distance (${rawRiskBull.toFixed(6)}) is below the minimum structural threshold (${minRisk}) for ${instClean}. Stop Loss is too close to Entry.`;
+      console.warn(`[TradeValidator] ${reason}`);
+      return {
+        isValid: false,
+        rejectionReason: reason,
+        actualRR: 0,
+        geometryValid: true,
+        structuralSLValid: false,
+        structuralTPValid: true,
+        instrumentSupported: true,
+        timestamp: now,
+      };
+    }
+
+    // 5. Exact Unrounded Risk-to-Reward Calculation
+    const rawRisk = rawRiskBull;
     const rawReward = target - entry;
     const preciseRisk = Math.round(rawRisk * 1e8);
     const preciseReward = Math.round(rawReward * 1e8);
@@ -293,8 +329,26 @@ export function validateTradeSetup(setup: TradeSetupValidationInput): TradeSetup
       };
     }
 
-    // 4. Exact Unrounded Risk-to-Reward Calculation
-    const rawRisk = stop - entry;
+    // 4. Minimum Risk Distance Sanity (before R:R calculation)
+    const minRiskBear = getValidatorMinRisk(setup.instrumentId);
+    const rawRiskBear = stop - entry;
+    if (rawRiskBear < minRiskBear) {
+      const reason = `SETUP_REJECTED: Risk distance (${rawRiskBear.toFixed(6)}) is below the minimum structural threshold (${minRiskBear}) for ${instClean}. Stop Loss is too close to Entry.`;
+      console.warn(`[TradeValidator] ${reason}`);
+      return {
+        isValid: false,
+        rejectionReason: reason,
+        actualRR: 0,
+        geometryValid: true,
+        structuralSLValid: false,
+        structuralTPValid: true,
+        instrumentSupported: true,
+        timestamp: now,
+      };
+    }
+
+    // 5. Exact Unrounded Risk-to-Reward Calculation
+    const rawRisk = rawRiskBear;
     const rawReward = entry - target;
     const preciseRisk = Math.round(rawRisk * 1e8);
     const preciseReward = Math.round(rawReward * 1e8);

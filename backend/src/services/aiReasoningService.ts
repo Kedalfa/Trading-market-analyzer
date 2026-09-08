@@ -3,6 +3,97 @@ import { StructuredSMCAnalysis, TradingScenario, SetupQualityScore, SetupScoreCo
 import { NewsContext } from '../types/news';
 import { STRATEGY_RULESETS } from '../engine/rulesets/smcRulesets';
 import { calculateATR } from '../engine/displacement/displacementEngine';
+import { SwingPoint } from '../types/structure';
+import { DisplacementMove } from '../types/smc';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURAL SL HELPERS
+// These helpers produce professional, instrument-aware stop-loss parameters
+// that reflect real structural risk — NOT zone-floor proximity.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the minimum buffer (in price units) to place below/above the
+ * structural SL anchor. Derived from ATR and per-instrument minimums.
+ */
+function getStructuralSLBuffer(instrumentId: string, currentATR: number, pipSize: number): number {
+  const inst = instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
+  // Minimum: 30% of ATR (breathing room beyond structural level)
+  // Floor: instrument-specific minimum meaningful stop distance
+  if (inst.includes('JPY'))  return Math.max(0.15,  currentATR * 0.30);   // ≥15 JPY pips
+  if (inst === 'EURUSD')     return Math.max(0.0010, currentATR * 0.30);   // ≥10 pips
+  if (inst === 'GBPUSD')     return Math.max(0.0012, currentATR * 0.30);   // ≥12 pips (GBP is wider)
+  if (inst === 'XAUUSD')     return Math.max(5.0,    currentATR * 0.30);   // ≥$5 gold
+  if (inst.includes('BTC'))  return Math.max(200.0,  currentATR * 0.25);   // ≥$200 BTC
+  if (inst === 'US500')      return Math.max(15.0,   currentATR * 0.30);   // ≥15 index points
+  if (inst === 'NAS100')     return Math.max(50.0,   currentATR * 0.30);   // ≥50 NAS points
+  return Math.max(pipSize * 15, currentATR * 0.30);                          // generic fallback
+}
+
+/**
+ * Returns the minimum acceptable risk distance (entry → SL) in price units.
+ * A setup with risk smaller than this is structurally unsound and must be
+ * rejected before R:R calculation — no matter how high R:R appears.
+ */
+function getMinimumRiskDistance(instrumentId: string, currentATR: number): number {
+  const inst = instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
+  // Minimum risk = 0.5 × ATR (below this the position is inside spread territory)
+  if (inst.includes('JPY'))  return Math.max(0.20,  currentATR * 0.50);
+  if (inst === 'EURUSD')     return Math.max(0.0015, currentATR * 0.50);
+  if (inst === 'GBPUSD')     return Math.max(0.0018, currentATR * 0.50);
+  if (inst === 'XAUUSD')     return Math.max(8.0,    currentATR * 0.50);
+  if (inst.includes('BTC'))  return Math.max(300.0,  currentATR * 0.40);
+  if (inst === 'US500')      return Math.max(20.0,   currentATR * 0.50);
+  if (inst === 'NAS100')     return Math.max(70.0,   currentATR * 0.50);
+  return currentATR * 0.50;
+}
+
+/**
+ * For a BULLISH setup, find the most relevant swing LOW that preceded the
+ * displacement that created the entry structure (FVG or OB). This is the
+ * structural invalidation point — below it, the bullish thesis is destroyed.
+ * Falls back through cascade: displacement origin → nearest swing low → undefined.
+ */
+function getDisplacementOriginSwingLow(
+  displacementStartIndex: number | undefined,
+  swings: SwingPoint[]
+): number | undefined {
+  const swingLows = swings.filter(s => s.type === 'LOW');
+  if (!swingLows.length) return undefined;
+
+  if (displacementStartIndex !== undefined && displacementStartIndex > 0) {
+    // Find the most recent swing low whose index is <= the displacement start
+    // This is the swing low immediately before the displacement that created the FVG/OB
+    const precedingLow = [...swingLows]
+      .filter(s => s.index <= displacementStartIndex)
+      .sort((a, b) => b.index - a.index)[0];
+    if (precedingLow) return precedingLow.price;
+  }
+
+  // Fallback: most recent confirmed swing low
+  return swingLows[swingLows.length - 1].price;
+}
+
+/**
+ * For a BEARISH setup, find the most relevant swing HIGH that preceded the
+ * displacement. This is the structural invalidation for shorts.
+ */
+function getDisplacementOriginSwingHigh(
+  displacementStartIndex: number | undefined,
+  swings: SwingPoint[]
+): number | undefined {
+  const swingHighs = swings.filter(s => s.type === 'HIGH');
+  if (!swingHighs.length) return undefined;
+
+  if (displacementStartIndex !== undefined && displacementStartIndex > 0) {
+    const precedingHigh = [...swingHighs]
+      .filter(s => s.index <= displacementStartIndex)
+      .sort((a, b) => b.index - a.index)[0];
+    if (precedingHigh) return precedingHigh.price;
+  }
+
+  return swingHighs[swingHighs.length - 1].price;
+}
 
 export function generateStructuredSMCAnalysis(
   pipeline: FullSMCPipelineResult,
@@ -21,6 +112,11 @@ export function generateStructuredSMCAnalysis(
 
   const atrs = calculateATR(candles, 14);
   const currentATR = atrs.length > 0 ? atrs[atrs.length - 1] : (lastPrice * 0.002);
+
+  // Instrument-aware structural SL helpers
+  const structuralSLBuffer   = getStructuralSLBuffer(instrument.id, currentATR, pipSize);
+  const minimumRiskDistance  = getMinimumRiskDistance(instrument.id, currentATR);
+  // Legacy: keep volatilityBuffer for non-SL uses (proximity, etc.)
   const volatilityBuffer = Math.max(pipSize * 3, currentATR * 0.15);
 
   // 2. HTF Bias & Intermediate Trend
@@ -100,28 +196,68 @@ export function generateStructuredSMCAnalysis(
   // Bullish Entry Level (Top of demand zone)
   const bullEntry = bullIdentified ? bullEntryTop : 0;
 
-  // Bullish Structural SL
+  // ── STRUCTURAL BULLISH SL CASCADE ────────────────────────────────────────
+  // The SL anchor must be the structural swing extreme that invalidates the
+  // bullish thesis — NEVER the floor of the entry zone itself.
+  // Priority:
+  //   1. Swept sell-side liquidity extreme (sweep-reclaim entries)
+  //   2. Swing low preceding the displacement that created the OB/FVG
+  //   3. Order Block bottomPrice (for OB entries, the OB floor IS the structural invalidation)
+  //   4. Dealing range extreme low
+  //   5. Most recent confirmed swing low
   let bullSLStructureType: TradingScenario['slStructureType'] = 'SWING_LOW';
   let bullSLStructurePrice = 0;
-  if (bullOB) {
+  let bullSLDispOriginIdx: number | undefined = undefined;
+
+  if (bullEntryStructureType === 'LIQUIDITY_SWEEP_RECLAIM' && recentSweep && recentSweep.direction === 'SELLSIDE') {
+    // SL = below the sweep extreme wick (the lowest point of the sweep candle)
+    bullSLStructurePrice = recentSweep.sweepExtremePrice ?? recentSweep.price;
+    bullSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
+  } else if (bullEntryStructureType === 'FVG' && unmitigatedBullFVG) {
+    // FVG entry: SL must come from the swing low that preceded the displacement,
+    // NOT from the FVG bottom (which is inside the entry zone).
+    bullSLDispOriginIdx = displacements.find(d =>
+      d.startIndex <= unmitigatedBullFVG.candle2Index && d.endIndex >= unmitigatedBullFVG.candle2Index
+    )?.startIndex;
+    const dispOriginSwingLow = getDisplacementOriginSwingLow(bullSLDispOriginIdx, structure.swings);
+    if (dispOriginSwingLow !== undefined) {
+      bullSLStructurePrice = dispOriginSwingLow;
+      bullSLStructureType = 'SWING_LOW';
+    } else {
+      // Fallback: dealing range low or nearest swing low
+      const lastLow = structure.swings.filter(s => s.type === 'LOW').pop();
+      bullSLStructurePrice = dealingRange ? dealingRange.rangeLow : (lastLow?.price ?? (bullEntry - currentATR));
+      bullSLStructureType = dealingRange ? 'DEALING_RANGE_EXTREME' : 'SWING_LOW';
+    }
+  } else if (bullEntryStructureType === 'ORDER_BLOCK' && bullOB) {
+    // OB entry: SL below OB bottom. The OB bottom IS the structural invalidation
+    // because a close below it destroys the order block entirely.
     bullSLStructurePrice = bullOB.bottomPrice;
     bullSLStructureType = 'ORDER_BLOCK_INVALIDATION';
-  } else if (unmitigatedBullFVG) {
-    bullSLStructurePrice = unmitigatedBullFVG.bottom;
-    bullSLStructureType = 'FVG_INVALIDATION';
-  } else if (recentSweep && recentSweep.direction === 'SELLSIDE') {
-    bullSLStructurePrice = recentSweep.price;
-    bullSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
-  } else if (dealingRange) {
+    // Additionally anchor to the swing low of the displacement origin
+    bullSLDispOriginIdx = displacements.find(d => d.startIndex <= bullOB.originCandleIndex)?.startIndex;
+    const dispOriginSwingLow = getDisplacementOriginSwingLow(bullSLDispOriginIdx, structure.swings);
+    if (dispOriginSwingLow !== undefined && dispOriginSwingLow < bullOB.bottomPrice) {
+      // Use the swing low (deeper) if it's further from entry — more structural
+      bullSLStructurePrice = dispOriginSwingLow;
+      bullSLStructureType = 'SWING_LOW';
+    }
+  } else if (bullEntryStructureType === 'BREAKER_BLOCK' && bullBreaker) {
+    bullSLStructurePrice = bullBreaker.bottomPrice;
+    bullSLStructureType = 'ORDER_BLOCK_INVALIDATION';
+  } else if (bullEntryStructureType === 'PREMIUM_DISCOUNT_EQUILIBRIUM' && dealingRange) {
     bullSLStructurePrice = dealingRange.rangeLow;
     bullSLStructureType = 'DEALING_RANGE_EXTREME';
   } else {
+    // Final fallback: nearest confirmed swing low
     const lastLow = structure.swings.filter(s => s.type === 'LOW').pop();
-    bullSLStructurePrice = lastLow ? lastLow.price : (bullEntry - currentATR);
+    bullSLStructurePrice = lastLow ? lastLow.price : (bullEntry - currentATR * 1.5);
+    bullSLStructureType = 'SWING_LOW';
   }
 
-  const bullSL = bullIdentified ? Number((bullSLStructurePrice - volatilityBuffer).toFixed(decimals)) : 0;
-  const bullSLReason = `Structural invalidation ${volatilityBuffer.toFixed(decimals)} below ${bullSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bullSLStructurePrice.toFixed(decimals)})`;
+  // Apply structural buffer: minimum distance below the invalidation anchor
+  const bullSL = bullIdentified ? Number((bullSLStructurePrice - structuralSLBuffer).toFixed(decimals)) : 0;
+  const bullSLReason = `Structural invalidation ${structuralSLBuffer.toFixed(decimals)} below ${bullSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bullSLStructurePrice.toFixed(decimals)})`;
 
   // Bullish Structural Take Profit (Opposing Liquidity)
   let bullTP1 = 0;
@@ -178,8 +314,13 @@ export function generateStructuredSMCAnalysis(
   }
 
   // Hard Geometry Sanity Validation
-  const isBullGeometryValid = bullIdentified && (bullSL < bullEntry) && (bullEntry < bullTP2) && (bullRR >= 1.5);
+  // Minimum risk distance gate: reject if risk < 0.5 ATR (SL too close to entry)
+  const bullRiskTooSmall = bullRisk < minimumRiskDistance;
+  const isBullGeometryValid = bullIdentified && !bullRiskTooSmall && (bullSL < bullEntry) && (bullEntry < bullTP2) && (bullRR >= 1.9);
   if (!isBullGeometryValid) {
+    if (bullIdentified && bullRiskTooSmall) {
+      console.debug(`[SMCEngine] Bull setup rejected — risk distance ${bullRisk.toFixed(decimals)} < minimum ${minimumRiskDistance.toFixed(decimals)} for ${instrument.id}`);
+    }
     bullIdentified = false;
   }
 
@@ -296,28 +437,57 @@ export function generateStructuredSMCAnalysis(
   // Bearish Entry Level (Bottom of supply zone)
   const bearEntry = bearIdentified ? bearEntryBottom : 0;
 
-  // Bearish Structural SL
+  // ── STRUCTURAL BEARISH SL CASCADE ────────────────────────────────────────
+  // The SL anchor must be the structural swing extreme that invalidates the
+  // bearish thesis — NEVER the ceiling of the entry zone itself.
   let bearSLStructureType: TradingScenario['slStructureType'] = 'SWING_HIGH';
   let bearSLStructurePrice = 0;
-  if (bearOB) {
+  let bearSLDispOriginIdx: number | undefined = undefined;
+
+  if (bearEntryStructureType === 'LIQUIDITY_SWEEP_RECLAIM' && recentSweep && recentSweep.direction === 'BUYSIDE') {
+    // SL = above the sweep extreme wick (highest point of the buy-side sweep)
+    bearSLStructurePrice = recentSweep.sweepExtremePrice ?? recentSweep.price;
+    bearSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
+  } else if (bearEntryStructureType === 'FVG' && unmitigatedBearFVG) {
+    // FVG entry: SL must come from the swing HIGH that preceded the displacement,
+    // NOT from the FVG top (which is inside the entry zone).
+    bearSLDispOriginIdx = displacements.find(d =>
+      d.startIndex <= unmitigatedBearFVG.candle2Index && d.endIndex >= unmitigatedBearFVG.candle2Index
+    )?.startIndex;
+    const dispOriginSwingHigh = getDisplacementOriginSwingHigh(bearSLDispOriginIdx, structure.swings);
+    if (dispOriginSwingHigh !== undefined) {
+      bearSLStructurePrice = dispOriginSwingHigh;
+      bearSLStructureType = 'SWING_HIGH';
+    } else {
+      const lastHigh = structure.swings.filter(s => s.type === 'HIGH').pop();
+      bearSLStructurePrice = dealingRange ? dealingRange.rangeHigh : (lastHigh?.price ?? (bearEntry + currentATR));
+      bearSLStructureType = dealingRange ? 'DEALING_RANGE_EXTREME' : 'SWING_HIGH';
+    }
+  } else if (bearEntryStructureType === 'ORDER_BLOCK' && bearOB) {
+    // OB entry: SL above OB top. A close above OB top destroys the bearish thesis.
     bearSLStructurePrice = bearOB.topPrice;
     bearSLStructureType = 'ORDER_BLOCK_INVALIDATION';
-  } else if (unmitigatedBearFVG) {
-    bearSLStructurePrice = unmitigatedBearFVG.top;
-    bearSLStructureType = 'FVG_INVALIDATION';
-  } else if (recentSweep && recentSweep.direction === 'BUYSIDE') {
-    bearSLStructurePrice = recentSweep.price;
-    bearSLStructureType = 'LIQUIDITY_SWEEP_EXTREME';
-  } else if (dealingRange) {
+    // Additionally anchor to the swing high of the displacement origin if higher
+    bearSLDispOriginIdx = displacements.find(d => d.startIndex <= bearOB.originCandleIndex)?.startIndex;
+    const dispOriginSwingHigh = getDisplacementOriginSwingHigh(bearSLDispOriginIdx, structure.swings);
+    if (dispOriginSwingHigh !== undefined && dispOriginSwingHigh > bearOB.topPrice) {
+      bearSLStructurePrice = dispOriginSwingHigh;
+      bearSLStructureType = 'SWING_HIGH';
+    }
+  } else if (bearEntryStructureType === 'BREAKER_BLOCK' && bearBreaker) {
+    bearSLStructurePrice = bearBreaker.topPrice;
+    bearSLStructureType = 'ORDER_BLOCK_INVALIDATION';
+  } else if (bearEntryStructureType === 'PREMIUM_DISCOUNT_EQUILIBRIUM' && dealingRange) {
     bearSLStructurePrice = dealingRange.rangeHigh;
     bearSLStructureType = 'DEALING_RANGE_EXTREME';
   } else {
     const lastHigh = structure.swings.filter(s => s.type === 'HIGH').pop();
-    bearSLStructurePrice = lastHigh ? lastHigh.price : (bearEntry + currentATR);
+    bearSLStructurePrice = lastHigh ? lastHigh.price : (bearEntry + currentATR * 1.5);
+    bearSLStructureType = 'SWING_HIGH';
   }
 
-  const bearSL = bearIdentified ? Number((bearSLStructurePrice + volatilityBuffer).toFixed(decimals)) : 0;
-  const bearSLReason = `Structural invalidation ${volatilityBuffer.toFixed(decimals)} above ${bearSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bearSLStructurePrice.toFixed(decimals)})`;
+  const bearSL = bearIdentified ? Number((bearSLStructurePrice + structuralSLBuffer).toFixed(decimals)) : 0;
+  const bearSLReason = `Structural invalidation ${structuralSLBuffer.toFixed(decimals)} above ${bearSLStructureType.replace(/_/g, ' ').toLowerCase()} (${bearSLStructurePrice.toFixed(decimals)})`;
 
   // Bearish Structural Take Profit (Opposing Liquidity)
   let bearTP1 = 0;
@@ -374,8 +544,13 @@ export function generateStructuredSMCAnalysis(
   }
 
   // Hard Geometry Sanity Validation
-  const isBearGeometryValid = bearIdentified && (bearTP2 < bearEntry) && (bearEntry < bearSL) && (bearRR >= 1.5);
+  // Minimum risk distance gate: reject if risk < 0.5 ATR (SL too close to entry)
+  const bearRiskTooSmall = bearRisk < minimumRiskDistance;
+  const isBearGeometryValid = bearIdentified && !bearRiskTooSmall && (bearTP2 < bearEntry) && (bearEntry < bearSL) && (bearRR >= 1.9);
   if (!isBearGeometryValid) {
+    if (bearIdentified && bearRiskTooSmall) {
+      console.debug(`[SMCEngine] Bear setup rejected — risk distance ${bearRisk.toFixed(decimals)} < minimum ${minimumRiskDistance.toFixed(decimals)} for ${instrument.id}`);
+    }
     bearIdentified = false;
   }
 

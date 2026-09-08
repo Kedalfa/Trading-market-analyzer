@@ -26,43 +26,124 @@ export interface ITelegramUserSettings {
   accountRiskPercent?: number;
 }
 
+export interface IVerificationHistoryEntry {
+  timestamp: Date;
+  success: boolean;
+  codeHashPrefix: string; // first 8 chars of SHA256 — never exposes full hash
+  ipHint?: string;
+}
+
 export interface ITelegramUser extends Document {
-  userId: string;
-  chatId?: number;
-  telegramUsername?: string;
+  // ── Web account linkage ────────────────────────────────────────
+  userId: string;                      // Internal web account ID (e.g. 'user_1')
+  linkedWebUserId: string;             // Explicit web account owner (same as userId)
+
+  // ── Telegram identity ─────────────────────────────────────────
+  telegramUserId?: number;             // Numeric Telegram user ID (authoritative identity)
+  chatId?: number;                     // Telegram chat ID (matches DM chat)
+  telegramUsername?: string;           // @handle (optional, can change)
   firstName?: string;
-  connectionCode?: string;
-  codeExpiresAt?: Date;
+  lastName?: string;
+  languageCode?: string;
+
+  // ── Connection state ──────────────────────────────────────────
   isConnected: boolean;
   connectedAt?: Date;
   lastActiveAt?: Date;
-  watchlist: string[];
-  settings: ITelegramUserSettings;
+
+  // ── Legacy pairing code (website → bot connect) ───────────────
+  connectionCode?: string;
+  codeExpiresAt?: Date;
+
+  // ── Authorization state (permanent flag) ─────────────────────
   isAuthorized: boolean;
   authorizedAt?: Date;
+
+  // ── Active session (resets on every /start) ───────────────────
+  sessionToken?: string;              // Random UUID for current login session
+  sessionCreatedAt?: Date;            // When this session was created
+  sessionExpiresAt?: Date;            // Session expiry (24h after creation)
+  sessionLastActivityAt?: Date;       // Updated on each bot interaction
+  sessionIsActive: boolean;           // Explicitly invalidated on disconnect/revoke
+
+  // ── Verification code (SHA-256 hashed, website-generated) ─────
   verificationCodeHash?: string;
   verificationExpiresAt?: Date;
   verificationAttempts: number;
   lastCodeRequestedAt?: Date;
+
+  // ── Rate limiting / brute-force protection ────────────────────
+  failedAuthAttempts: number;         // Account-level failed /start code attempts
+  lastFailedAuthAt?: Date;
+  codeLockedUntil?: Date;             // Locked out after too many failures
+
+  // ── Audit history ─────────────────────────────────────────────
+  verificationHistory: IVerificationHistoryEntry[];
+
+  // ── Preferences ───────────────────────────────────────────────
+  watchlist: string[];
+  settings: ITelegramUserSettings;
 }
 
 const telegramUserSchema = new Schema<ITelegramUser>(
   {
+    // Web account linkage
     userId: { type: String, required: true, unique: true, index: true },
+    linkedWebUserId: { type: String, default: 'user_1', index: true },
+
+    // Telegram identity
+    telegramUserId: { type: Number, index: true, sparse: true, unique: true },
     chatId: { type: Number, index: true, sparse: true },
     telegramUsername: String,
     firstName: String,
-    connectionCode: { type: String, index: true },
-    codeExpiresAt: Date,
+    lastName: String,
+    languageCode: String,
+
+    // Connection state
     isConnected: { type: Boolean, default: false, index: true },
     connectedAt: Date,
     lastActiveAt: Date,
+
+    // Legacy pairing code
+    connectionCode: { type: String, index: true, sparse: true },
+    codeExpiresAt: Date,
+
+    // Authorization state
     isAuthorized: { type: Boolean, default: false, index: true },
     authorizedAt: Date,
+
+    // Active session
+    sessionToken: { type: String, index: true, sparse: true },
+    sessionCreatedAt: Date,
+    sessionExpiresAt: Date,
+    sessionLastActivityAt: Date,
+    sessionIsActive: { type: Boolean, default: false, index: true },
+
+    // Verification code
     verificationCodeHash: String,
     verificationExpiresAt: Date,
     verificationAttempts: { type: Number, default: 0 },
     lastCodeRequestedAt: Date,
+
+    // Rate limiting
+    failedAuthAttempts: { type: Number, default: 0 },
+    lastFailedAuthAt: Date,
+    codeLockedUntil: Date,
+
+    // Audit history
+    verificationHistory: {
+      type: [
+        {
+          timestamp: { type: Date, required: true },
+          success: { type: Boolean, required: true },
+          codeHashPrefix: { type: String, required: true },
+          ipHint: String,
+        },
+      ],
+      default: [],
+    },
+
+    // Preferences
     watchlist: {
       type: [String],
       default: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'BTCUSDT'],

@@ -175,11 +175,35 @@ export function SetupDetailModal({ analysisId, onClose }: SetupDetailModalProps)
                   </p>
                 </div>
 
-                {/* Target */}
+                {/* Targets — multi-TP if available, single fallback for legacy records */}
                 <div className="p-4 rounded-xl bg-[#0e1628] border border-emerald-500/30 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400 font-bold">Target ({details.riskRewardRatio}R)</span>
-                    <strong className="text-emerald-400 font-mono text-sm">{details.targetPrice}</strong>
+                  <span className="text-slate-400 font-bold text-xs block">
+                    Targets ({details.riskRewardRatio}R to TP2)
+                  </span>
+                  <div className="space-y-1.5">
+                    {details.takeProfit1 != null ? (
+                      <>
+                        <div className="flex items-center justify-between p-1.5 rounded bg-emerald-950/20 border border-emerald-900/40">
+                          <span className="text-slate-400 text-[11px]">TP1 <span className="text-slate-600">(Partial / Internal)</span></span>
+                          <strong className="text-emerald-300 font-mono text-xs">{details.takeProfit1}</strong>
+                        </div>
+                        <div className="flex items-center justify-between p-1.5 rounded bg-emerald-950/30 border border-emerald-600/40">
+                          <span className="text-slate-400 text-[11px]">TP2 <span className="text-slate-600">(Primary Target)</span></span>
+                          <strong className="text-emerald-400 font-mono text-xs">{details.takeProfit2 ?? details.targetPrice}</strong>
+                        </div>
+                        {details.takeProfit3 != null && (
+                          <div className="flex items-center justify-between p-1.5 rounded bg-emerald-950/20 border border-emerald-400/30">
+                            <span className="text-slate-400 text-[11px]">TP3 <span className="text-slate-600">(Runner)</span></span>
+                            <strong className="text-emerald-200 font-mono text-xs">{details.takeProfit3}</strong>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex items-center justify-between p-1.5 rounded bg-emerald-950/30 border border-emerald-600/40">
+                        <span className="text-slate-400 text-[11px]">Target</span>
+                        <strong className="text-emerald-400 font-mono text-xs">{details.targetPrice}</strong>
+                      </div>
+                    )}
                   </div>
                   <p className="text-[11px] text-slate-400 leading-relaxed border-t border-slate-800 pt-2">
                     {details.targetReason}

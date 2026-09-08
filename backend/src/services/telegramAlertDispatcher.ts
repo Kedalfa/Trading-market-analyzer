@@ -40,9 +40,12 @@ class TelegramAlertDispatcher {
     const decimals = isForex ? 5 : 2;
 
     const symClean = params.symbol.replace('/', '').toUpperCase();
+    const now = new Date();
     const users = await TelegramUser.find({
       isConnected: true,
       isAuthorized: true,
+      sessionIsActive: true,
+      sessionExpiresAt: { $gt: now },
       chatId: { $exists: true },
       'settings.isMuted': false,
       'settings.alertTypes.newSetup': true,
@@ -74,9 +77,13 @@ class TelegramAlertDispatcher {
       `• ${escapeHtml(params.analysis.liquidityMap.nextTargetSummary)}\n\n` +
       `🎯 <b>ENTRY ZONE:</b> <code>${params.entryBottom.toFixed(decimals)} — ${params.entryTop.toFixed(decimals)}</code>\n` +
       `🛑 <b>STOP LOSS:</b> <code>${params.stopLoss.toFixed(decimals)}</code>\n` +
-      `🎯 <b>TAKE PROFIT (TP1):</b> <code>${params.target1.toFixed(decimals)}</code>\n` +
-      (params.target2 ? `🎯 <b>TAKE PROFIT (TP2):</b> <code>${params.target2.toFixed(decimals)}</code>\n` : '') +
-      `📐 <b>RISK : REWARD:</b> <code>1 : ${params.riskReward.toFixed(1)}R</code>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎯 <b>TAKE PROFITS:</b>\n` +
+      `• <b>TP1</b> (Partial): <code>${params.target1.toFixed(decimals)}</code>\n` +
+      `• <b>TP2</b> (Primary): <code>${params.target2.toFixed(decimals)}</code>\n` +
+      (params.target3 ? `• <b>TP3</b> (Runner): <code>${params.target3.toFixed(decimals)}</code>\n` : '') +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📐 <b>RISK : REWARD (TP2):</b> <code>1 : ${params.riskReward.toFixed(1)}R</code>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
       `🧠 <b>STRUCTURAL EVIDENCE</b>\n` +
       `${evidenceLines}\n\n` +
@@ -144,15 +151,29 @@ class TelegramAlertDispatcher {
     const rr = analysisDoc?.riskRewardRatio ? Number(analysisDoc.riskRewardRatio).toFixed(1) : '2.0';
 
     if (alertType === 'TP_HIT' || alertType === 'TP1' || alertType === 'TP2' || alertType === 'TP3') {
+      // Determine which TP level was hit and its exact price
+      const tpLevel = alertType === 'TP1' ? 'TP1'
+        : alertType === 'TP2' ? 'TP2'
+        : alertType === 'TP3' ? 'TP3'
+        : 'TP1'; // TP_HIT without level = TP1
+
+      // Read the exact TP prices persisted in the analysis document
+      const tp1 = analysisDoc?.takeProfit1 || analysisDoc?.targetPrice;
+      const tp2 = analysisDoc?.takeProfit2 || analysisDoc?.targetPrice;
+      const tp3 = analysisDoc?.takeProfit3;
+
+      const hitPrice = tpLevel === 'TP3' ? tp3
+        : tpLevel === 'TP2' ? tp2
+        : tp1;
+
       return (
-        `🎯 <b>TAKE PROFIT REACHED</b>\n\n` +
+        `🎯 <b>${tpLevel} HIT</b>\n\n` +
         `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
-        `<b>Target:</b> TP1\n` +
+        (hitPrice != null ? `<b>${tpLevel} Price:</b> <code>${hitPrice}</code>\n` : '') +
         (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
-        (target != null ? `<b>Take Profit:</b> <code>${target}</code>\n` : '') +
         (observedPrice != null ? `<b>Exit Price:</b> <code>${observedPrice}</code>\n` : '') +
-        `Price reached the target level with verified structural execution.\n\n` +
-        `<b>Result:</b> Target Hit (+${rr}R)\n` +
+        `Price reached the ${tpLevel} target level with verified structural execution.\n\n` +
+        `<b>Result:</b> ${tpLevel} Hit (+${rr}R)\n` +
         `<b>Setup ID:</b> <code>${setupId}</code>`
       );
     }
@@ -201,6 +222,10 @@ class TelegramAlertDispatcher {
         ? `${(distance * pipMultiplier).toFixed(1)} ${mapping?.assetClass === 'forex' ? 'pips' : 'pts'}`
         : null;
 
+      const tp1 = analysisDoc?.takeProfit1;
+      const tp2 = analysisDoc?.takeProfit2 || analysisDoc?.targetPrice;
+      const tp3 = analysisDoc?.takeProfit3;
+
       return (
         `⚠️ <b>ENTRY APPROACHING</b>\n\n` +
         `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
@@ -208,7 +233,9 @@ class TelegramAlertDispatcher {
         (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
         (distancePips != null ? `<b>Distance:</b> ${distancePips}\n` : '') +
         (stop != null ? `<b>SL:</b> <code>${stop}</code>\n` : '') +
-        (target != null ? `<b>TP:</b> <code>${target}</code>\n` : '') +
+        (tp1 != null ? `<b>TP1:</b> <code>${tp1}</code>\n` : '') +
+        (tp2 != null ? `<b>TP2:</b> <code>${tp2}</code>\n` : '') +
+        (tp3 != null ? `<b>TP3:</b> <code>${tp3}</code>\n` : '') +
         `<b>R:R:</b> ${rr}R\n\n` +
         `Setup is approaching the entry zone.\n\n` +
         `<b>Setup ID:</b> <code>${setupId}</code>`
@@ -216,13 +243,19 @@ class TelegramAlertDispatcher {
     }
 
     if (alertType === 'ENTRY_TRIGGERED') {
+      const tp1 = analysisDoc?.takeProfit1;
+      const tp2 = analysisDoc?.takeProfit2 || analysisDoc?.targetPrice;
+      const tp3 = analysisDoc?.takeProfit3;
+
       return (
         `🟢 <b>ENTRY REACHED — TRADE ACTIVE</b>\n\n` +
         `<b>${escapeHtml(symbol)}</b> — <b>${dirLabel}</b>\n\n` +
         (entry != null ? `<b>Entry:</b> <code>${entry}</code>\n` : '') +
         (observedPrice != null ? `<b>Current:</b> <code>${observedPrice}</code>\n` : '') +
         (stop != null ? `<b>SL:</b> <code>${stop}</code>\n` : '') +
-        (target != null ? `<b>TP:</b> <code>${target}</code>\n` : '') +
+        (tp1 != null ? `<b>TP1:</b> <code>${tp1}</code>\n` : '') +
+        (tp2 != null ? `<b>TP2:</b> <code>${tp2}</code>\n` : '') +
+        (tp3 != null ? `<b>TP3:</b> <code>${tp3}</code>\n` : '') +
         `<b>R:R:</b> ${rr}R\n\n` +
         `Trade is now active.\n\n` +
         `<b>Setup ID:</b> <code>${setupId}</code>`
@@ -250,9 +283,12 @@ class TelegramAlertDispatcher {
     analysisDoc?: any
   ): Promise<void> {
     const symClean = symbol.replace('/', '').toUpperCase();
+    const now = new Date();
     const users = await TelegramUser.find({
       isConnected: true,
       isAuthorized: true,
+      sessionIsActive: true,
+      sessionExpiresAt: { $gt: now },
       chatId: { $exists: true },
       'settings.isMuted': false,
       watchlist: { $in: [symClean, symbol] },

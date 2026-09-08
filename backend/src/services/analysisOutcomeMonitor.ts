@@ -1,5 +1,5 @@
 /**
- * Deterministic SMC Analysis Outcome Monitor & Lifecycle State Machine
+ * Deterministic SMC Analysis Outcome Monitor, Stale Entry Protection & Offline Recovery Engine
  * 
  * Strict Finite State Machine:
  * 
@@ -11,12 +11,13 @@
  *                           │
  *           ┌───────────────┴───────────────┐
  *           │                               │
- *  Structural Invalidation             Executable Entry Touched
- *  BEFORE Entry Reached                (Ask for Long, Bid for Short)
- *           │                               │
- *           ▼                               ▼
- *    [ INVALIDATED ]                [ ENTRY_REACHED ] (ACTIVE TRADE)
- *   (TERMINAL STATE)                        │
+ *  Structural Invalidation /           Executable Entry Touched
+ *  Stale Expiration / Thesis Broken    AND Pre-Entry Structural
+ *           │                          Re-Validation PASSED
+ *           ▼                               │
+ *    [ INVALIDATED ]                        ▼
+ *   (TERMINAL STATE)                [ ENTRY_REACHED ] (ACTIVE TRADE)
+ *                                           │
  *                               ┌───────────┴───────────┐
  *                               │                       │
  *                           Take Profit             Stop Loss
@@ -27,13 +28,13 @@
  *                        [ TARGET_HIT ]          [ STOPPED_OUT ]
  *                       (TERMINAL STATE)        (TERMINAL STATE)
  * 
- * INVARIANT RULES:
- * 1. Invalidation has absolute priority over Entry.
- * 2. An invalidated setup is terminal — it NEVER transitions to Entry Reached or Active.
- * 3. Pre-entry breach is labeled INVALIDATED; Post-entry breach is labeled STOPPED_OUT.
- * 4. Same-candle entry & invalidation conflicts are resolved without fabrication (marked AMBIGUOUS).
- * 5. Expired setups are transitioned to INVALIDATED with reason "SETUP_EXPIRED".
- * 6. Idempotent: repeated evaluation cycles on identical market states yield identical results.
+ * STALE ENTRY PROTECTION & VALIDITY RULES:
+ * 1. Entry reach is NOT enough: before accepting ANY entry, pre-entry structural integrity is verified.
+ * 2. Timeframe-aware validity windows (e.g. 15M: 10h / 40 bars; 1H: 36h; 4H: 120h).
+ * 3. Target pre-reached without entry fill $\rightarrow$ INVALIDATED (stale liquidity exhaustion).
+ * 4. Opposing structural breach before entry $\rightarrow$ INVALIDATED.
+ * 5. Terminal invalidation is permanent: price later touching old entry triggers NO trade or alert.
+ * 6. New market structure generates independent NEW setups with new IDs, entries, and validity.
  */
 
 import { Analysis, IAnalysis } from '../models/Analysis';
@@ -45,6 +46,8 @@ export interface MonitorHealthStatus {
   isMonitorRunning: boolean;
   lastEvaluationTimestamp: string | null;
   activeAnalysesCount: number;
+  lastRecoveryTimestamp: string | null;
+  totalRecoveredSetups: number;
 }
 
 export const TERMINAL_STATUSES = new Set<string>([
@@ -62,7 +65,24 @@ export const monitorHealth: MonitorHealthStatus = {
   isMonitorRunning: false,
   lastEvaluationTimestamp: null,
   activeAnalysesCount: 0,
+  lastRecoveryTimestamp: null,
+  totalRecoveredSetups: 0,
 };
+
+/**
+ * Returns timeframe-aware validity duration in milliseconds.
+ * Respects natural institutional bar cycles instead of arbitrary flat timeouts.
+ */
+export function getTimeframeValidityMs(timeframe: string): number {
+  const tf = timeframe.toUpperCase();
+  if (tf === '1M') return 60 * 60 * 1000; // 60 mins (60 bars)
+  if (tf === '5M') return 50 * 5 * 60 * 1000; // 250 mins (~4.1 hours)
+  if (tf === '15M') return 40 * 15 * 60 * 1000; // 600 mins (10 hours / 40 bars)
+  if (tf === '1H') return 36 * 60 * 60 * 1000; // 36 hours (36 bars)
+  if (tf === '4H') return 30 * 4 * 3600 * 1000; // 120 hours (5 days / 30 bars)
+  if (tf === '1D') return 20 * 24 * 3600 * 1000; // 20 days (20 bars)
+  return 12 * 3600 * 1000; // Default 12 hours
+}
 
 export function getProximityThreshold(instrumentId: string, entryPrice: number): number {
   const inst = instrumentId.replace(/[\/\-_]/g, '').toUpperCase();
@@ -75,7 +95,75 @@ export function getProximityThreshold(instrumentId: string, entryPrice: number):
   return entryPrice * 0.002;
 }
 
-export async function evaluateSingleAnalysis(analysis: IAnalysis): Promise<void> {
+/**
+ * Pre-Entry Structural Re-Validation Engine.
+ * Verifies that the original SMC thesis, timeframe validity window, and dealing range context
+ * remain fully intact before ANY entry is allowed to execute.
+ */
+export function isSetupStillStructurallyValid(
+  analysis: IAnalysis,
+  candlesBeforeEntry: any[],
+  currentPrice: number,
+  evaluationTime: Date
+): { isValid: boolean; invalidationReason?: string } {
+  // 1. Timeframe-Aware Validity Window Check
+  const maxValidityMs = getTimeframeValidityMs(analysis.timeframe || '15M');
+  const expirationTime = analysis.expiresAt
+    ? analysis.expiresAt.getTime()
+    : (analysis.savedAt.getTime() + maxValidityMs);
+
+  if (evaluationTime.getTime() > expirationTime) {
+    return {
+      isValid: false,
+      invalidationReason: `SETUP_EXPIRED: Timeframe validity window (${Math.round(maxValidityMs / 3600000)}h) elapsed before entry fill`,
+    };
+  }
+
+  const isBull = analysis.direction === 'BULLISH';
+  const entry = analysis.entryPrice;
+  const invalidation = analysis.invalidationPrice || analysis.stopLossPrice;
+  const target = analysis.targetPrice;
+
+  // 2. Pre-Entry Direct Invalidation Level Breach Check
+  if (isBull && currentPrice <= invalidation) {
+    return {
+      isValid: false,
+      invalidationReason: `Structural demand invalidation level (${invalidation}) breached before entry fill`,
+    };
+  }
+  if (!isBull && currentPrice >= invalidation) {
+    return {
+      isValid: false,
+      invalidationReason: `Structural supply invalidation level (${invalidation}) breached before entry fill`,
+    };
+  }
+
+  // 3. Stale Runaway Distance Check (Target pre-reached without entry fill)
+  // If price reached the target area without filling entry first, the initial imbalance/draw on liquidity was already satisfied.
+  if (candlesBeforeEntry && candlesBeforeEntry.length > 0) {
+    for (const c of candlesBeforeEntry) {
+      if (isBull && target > entry && c.high >= target) {
+        return {
+          isValid: false,
+          invalidationReason: `Stale setup: Target area (${target}) reached without filling entry first (liquidity draw exhausted)`,
+        };
+      }
+      if (!isBull && target < entry && c.low <= target) {
+        return {
+          isValid: false,
+          invalidationReason: `Stale setup: Target area (${target}) reached without filling entry first (liquidity draw exhausted)`,
+        };
+      }
+    }
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Evaluates a single analysis document against historical candles and current tick.
+ */
+export async function evaluateSingleAnalysis(analysis: IAnalysis, isRecoveryPass = false): Promise<void> {
   // 1. Guard against already-terminal setups
   if (TERMINAL_STATUSES.has(analysis.outcome.status)) {
     return;
@@ -86,7 +174,7 @@ export async function evaluateSingleAnalysis(analysis: IAnalysis): Promise<void>
 
   try {
     const [data, authQuote] = await Promise.all([
-      getAuthoritativeCandles(analysis.instrumentId, analysis.timeframe, 60),
+      getAuthoritativeCandles(analysis.instrumentId, analysis.timeframe, 300),
       getAuthoritativeQuote(analysis.instrumentId),
     ]);
 
@@ -106,13 +194,17 @@ export async function evaluateSingleAnalysis(analysis: IAnalysis): Promise<void>
     return;
   }
 
-  await evaluateAnalysisOutcome(analysis, latestCandles, quote);
+  await evaluateAnalysisOutcome(analysis, latestCandles, quote, isRecoveryPass);
 }
 
+/**
+ * Core deterministic lifecycle evaluation, pre-entry structural validation & historical replay engine.
+ */
 export async function evaluateAnalysisOutcome(
   analysis: IAnalysis,
   latestCandles: any[],
-  quote: { price: number; bid?: number; ask?: number; providerTimestamp?: number }
+  quote: { price: number; bid?: number; ask?: number; providerTimestamp?: number },
+  isRecoveryPass = false
 ): Promise<void> {
   const currentStatus = analysis.outcome.status;
 
@@ -132,22 +224,23 @@ export async function evaluateAnalysisOutcome(
   const stop = analysis.stopLossPrice;
   const invalidation = analysis.invalidationPrice || stop;
 
-  // 2. CHECK EXPIRATION / STALENESS (Default 72h or configured expiresAt)
-  const expirationThreshold = analysis.expiresAt || new Date(analysis.savedAt.getTime() + 72 * 3600 * 1000);
+  // 2. CHECK EXPIRATION / TIMEFRAME VALIDITY WINDOW
+  const maxValidityMs = getTimeframeValidityMs(analysis.timeframe || '15M');
+  const expirationThreshold = analysis.expiresAt || new Date(analysis.savedAt.getTime() + maxValidityMs);
   if (now > expirationThreshold) {
     analysis.outcome.status = 'INVALIDATED';
-    analysis.outcome.invalidatedReason = 'SETUP_EXPIRED: Structural validity window elapsed before entry was reached';
+    analysis.outcome.invalidatedReason = `SETUP_EXPIRED: Timeframe validity window (${Math.round(maxValidityMs / 3600000)}h) elapsed before entry fill`;
     analysis.outcome.resolvedAt = now;
     analysis.outcome.completedAt = now;
     analysis.outcome.observedPrice = currentPrice;
     analysis.outcome.triggerPrice = currentPrice;
-    analysis.outcome.triggerReason = 'Setup expired after validity window without reaching entry';
+    analysis.outcome.triggerReason = 'Setup expired after timeframe validity window without reaching entry';
     analysis.outcome.monitoringStatus = 'Resolved: Setup Expired (Invalidated)';
     analysis.outcome.auditTrail.push({
       previousStatus: currentStatus,
       newStatus: 'INVALIDATED',
       timestamp: now,
-      triggerReason: 'Validity window elapsed before entry reached (SETUP_EXPIRED)',
+      triggerReason: `Timeframe validity window (${Math.round(maxValidityMs / 3600000)}h) elapsed before entry fill (SETUP_EXPIRED)`,
       observedPrice: currentPrice,
     });
     await analysis.save();
@@ -157,16 +250,25 @@ export async function evaluateAnalysisOutcome(
       analysis.symbol,
       'INVALIDATED',
       'SETUP EXPIRED',
-      'Structural validity window elapsed before entry was reached.',
+      `Structural validity window (${Math.round(maxValidityMs / 3600000)}h) elapsed before entry was reached.`,
       currentPrice,
       analysis
     );
     return;
   }
 
+  // 3. DETERMINE HISTORICAL REPLAY WINDOW
   const savedTsSeconds = Math.floor(analysis.savedAt.getTime() / 1000);
-  const relevantCandles = latestCandles
+  const replayStartSeconds = analysis.outcome.lastProcessedBarTimestamp
+    ? analysis.outcome.lastProcessedBarTimestamp
+    : savedTsSeconds;
+
+  const allCandlesSinceCreation = latestCandles
     .filter(c => c.timestamp >= savedTsSeconds)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const relevantCandles = latestCandles
+    .filter(c => c.timestamp >= replayStartSeconds)
     .sort((a, b) => a.timestamp - b.timestamp); // Strict ascending chronological order
 
   let entryReached = Boolean(analysis.outcome?.entryReachedAt || currentStatus === 'ENTRY_REACHED');
@@ -174,29 +276,31 @@ export async function evaluateAnalysisOutcome(
   let lowestObserved = entry;
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 3. HISTORICAL CANDLE-BY-CANDLE EVALUATION
+  // 4. CHRONOLOGICAL HISTORICAL BAR REPLAY
   // ──────────────────────────────────────────────────────────────────────────
   for (const c of relevantCandles) {
     const candleTime = new Date(c.timestamp * 1000);
+    const candlesPriorToCurrent = allCandlesSinceCreation.filter(bar => bar.timestamp <= c.timestamp);
 
-    // ── PHASE 1: PRE-ENTRY MONITORING (Waiting for Entry) ───────────────────
+    // ── PHASE 1: PRE-ENTRY REPLAY (Waiting for Entry) ───────────────────────
     if (!entryReached) {
       const candleInvalidated = isBull ? (c.low <= invalidation || c.close <= invalidation) : (c.high >= invalidation || c.close >= invalidation);
       const candleTouchedEntry = isBull ? c.low <= entry : c.high >= entry;
 
       // RULE 6 & 7: Invalidation has priority; handle same-candle conflict
       if (candleInvalidated && candleTouchedEntry) {
-        // Same candle touched both Entry and Invalidation
-        // Check candle open to see if it opened beyond invalidation
         const openedBeyondInvalidation = isBull ? c.open <= invalidation : c.open >= invalidation;
 
         if (openedBeyondInvalidation) {
           analysis.outcome.status = 'INVALIDATED';
+          analysis.outcome.isApproachingEntry = false;
+          analysis.outcome.entryApproachingNotified = false;
           analysis.outcome.invalidatedReason = `Structural ${isBull ? 'support' : 'resistance'} invalidation breached at bar open (${c.open})`;
           analysis.outcome.resolvedAt = candleTime;
           analysis.outcome.completedAt = candleTime;
           analysis.outcome.triggerPrice = invalidation;
           analysis.outcome.observedPrice = c.open;
+          analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
           analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
           analysis.outcome.monitoringStatus = 'Resolved: Invalidated';
           analysis.outcome.auditTrail.push({
@@ -214,20 +318,23 @@ export async function evaluateAnalysisOutcome(
             analysis.analysisId,
             analysis.symbol,
             'INVALIDATED',
-            'SETUP INVALIDATED',
-            `Candle opened beyond structural invalidation level (${invalidation}).`,
+            isRecoveryPass ? '[RECOVERED] SETUP INVALIDATED' : 'SETUP INVALIDATED',
+            `Structural invalidation occurred at ${candleTime.toUTCString()} (${invalidation}).`,
             c.open,
             analysis
           );
           return;
         }
 
-        // Otherwise: ambiguous sequence within bar -> Mark AMBIGUOUS, never falsely claim entry
+        // Ambiguous sequence within bar -> Mark AMBIGUOUS, never falsely claim entry
         analysis.outcome.status = 'AMBIGUOUS';
+        analysis.outcome.isApproachingEntry = false;
+        analysis.outcome.entryApproachingNotified = false;
         analysis.outcome.resolvedAt = candleTime;
         analysis.outcome.completedAt = candleTime;
         analysis.outcome.triggerPrice = invalidation;
         analysis.outcome.observedPrice = c.close;
+        analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
         analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
         analysis.outcome.triggerReason = 'Ambiguous resolution: Both entry and invalidation touched in the same OHLC bar';
         analysis.outcome.monitoringStatus = 'Resolved: Ambiguous Candle Conflict';
@@ -248,11 +355,14 @@ export async function evaluateAnalysisOutcome(
       if (candleInvalidated) {
         const invalidReason = `Structural ${isBull ? 'demand/low' : 'supply/high'} invalidation (${invalidation}) breached before entry reached`;
         analysis.outcome.status = 'INVALIDATED';
+        analysis.outcome.isApproachingEntry = false;
+        analysis.outcome.entryApproachingNotified = false;
         analysis.outcome.invalidatedReason = invalidReason;
         analysis.outcome.resolvedAt = candleTime;
         analysis.outcome.completedAt = candleTime;
         analysis.outcome.triggerPrice = invalidation;
         analysis.outcome.observedPrice = isBull ? c.low : c.high;
+        analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
         analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
         analysis.outcome.triggerReason = invalidReason;
         analysis.outcome.monitoringStatus = 'Resolved: Invalidated';
@@ -271,20 +381,61 @@ export async function evaluateAnalysisOutcome(
           analysis.analysisId,
           analysis.symbol,
           'INVALIDATED',
-          'SETUP INVALIDATED',
-          invalidReason,
+          isRecoveryPass ? '[RECOVERED] SETUP INVALIDATED' : 'SETUP INVALIDATED',
+          `${invalidReason} at ${candleTime.toUTCString()}.`,
           isBull ? c.low : c.high,
           analysis
         );
         return;
       }
 
-      // PRIORITY 2: Entry touched (and NOT invalidated)
+      // PRIORITY 2: Entry touched -> PRE-ENTRY STRUCTURAL RE-VALIDATION CHECK
       if (candleTouchedEntry) {
+        const validationResult = isSetupStillStructurallyValid(analysis, candlesPriorToCurrent, isBull ? c.low : c.high, candleTime);
+
+        if (!validationResult.isValid) {
+          // Pre-entry structural validation failed -> Terminally INVALIDATE (Do NOT trigger entry)
+          const invalidReason = validationResult.invalidationReason || 'Pre-entry structural validation failed';
+          analysis.outcome.status = 'INVALIDATED';
+          analysis.outcome.isApproachingEntry = false;
+          analysis.outcome.entryApproachingNotified = false;
+          analysis.outcome.invalidatedReason = invalidReason;
+          analysis.outcome.resolvedAt = candleTime;
+          analysis.outcome.completedAt = candleTime;
+          analysis.outcome.triggerPrice = entry;
+          analysis.outcome.observedPrice = isBull ? c.low : c.high;
+          analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
+          analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
+          analysis.outcome.monitoringStatus = 'Resolved: Invalidated (Stale Entry Protection)';
+          analysis.outcome.auditTrail.push({
+            previousStatus: currentStatus,
+            newStatus: 'INVALIDATED',
+            timestamp: candleTime,
+            triggerPrice: entry,
+            triggerReason: invalidReason,
+            observedPrice: isBull ? c.low : c.high,
+            marketDataTimestamp: c.timestamp,
+          });
+          await analysis.save();
+
+          await telegramAlertDispatcher.dispatchLifecycleAlert(
+            analysis.analysisId,
+            analysis.symbol,
+            'INVALIDATED',
+            isRecoveryPass ? '[RECOVERED] SETUP INVALIDATED' : 'SETUP INVALIDATED',
+            `${invalidReason} at ${candleTime.toUTCString()}.`,
+            isBull ? c.low : c.high,
+            analysis
+          );
+          return;
+        }
+
+        // Structural validation PASSED -> Legitimate Entry Reached
         entryReached = true;
         analysis.outcome.entryReachedAt = candleTime;
         analysis.outcome.status = 'ENTRY_REACHED';
         analysis.outcome.isApproachingEntry = false;
+        analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
         analysis.outcome.monitoringStatus = `Trade Active (Entry Reached at ${entry})`;
 
         if (!analysis.outcome.auditTrail.some(a => a.newStatus === 'ENTRY_REACHED')) {
@@ -293,7 +444,7 @@ export async function evaluateAnalysisOutcome(
             newStatus: 'ENTRY_REACHED',
             timestamp: candleTime,
             triggerPrice: entry,
-            triggerReason: `Price reached designated entry price ${entry} at ${candleTime.toUTCString()}`,
+            triggerReason: `Price reached designated entry price ${entry} at ${candleTime.toUTCString()} (Structural integrity confirmed)`,
             observedPrice: entry,
             marketDataTimestamp: c.timestamp,
           });
@@ -305,19 +456,19 @@ export async function evaluateAnalysisOutcome(
             analysis.analysisId,
             analysis.symbol,
             'ENTRY_TRIGGERED',
-            'ENTRY REACHED',
-            `Price reached structural entry zone at ${entry}. Position is now ACTIVE.`,
+            isRecoveryPass ? '[RECOVERED] ENTRY REACHED' : 'ENTRY REACHED',
+            `Price reached structural entry zone at ${entry} (${candleTime.toUTCString()}). Position is ACTIVE.`,
             entry,
             analysis
           );
         }
       } else {
-        // Still waiting for entry in this candle
+        analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
         continue;
       }
     }
 
-    // ── PHASE 2: POST-ENTRY MONITORING (Active Trade) ───────────────────────
+    // ── PHASE 2: POST-ENTRY REPLAY (Active Trade in Market) ─────────────────
     if (c.high > highestObserved) highestObserved = c.high;
     if (c.low < lowestObserved) lowestObserved = c.low;
 
@@ -330,6 +481,7 @@ export async function evaluateAnalysisOutcome(
       analysis.outcome.resolvedAt = candleTime;
       analysis.outcome.completedAt = candleTime;
       analysis.outcome.triggerPrice = currentPrice;
+      analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
       analysis.outcome.triggerReason = 'Ambiguous resolution: Both target and stop reached in the same active OHLC bar';
       analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
       analysis.outcome.monitoringStatus = 'Resolved: Ambiguous Candle';
@@ -338,7 +490,7 @@ export async function evaluateAnalysisOutcome(
         newStatus: 'AMBIGUOUS',
         timestamp: candleTime,
         triggerPrice: currentPrice,
-        triggerReason: 'Both target and stop reached in the same OHLC bar',
+        triggerReason: 'Both target and stop reached in the same OHLC bar during replay',
         observedPrice: currentPrice,
         marketDataTimestamp: c.timestamp,
       });
@@ -355,6 +507,7 @@ export async function evaluateAnalysisOutcome(
       analysis.outcome.targetHitAt = candleTime;
       analysis.outcome.triggerPrice = target;
       analysis.outcome.observedPrice = target;
+      analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
       analysis.outcome.maxFavorableExcursion = Number(mfe.toFixed(5));
       analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
       analysis.outcome.triggerReason = `Target price of ${target} successfully reached`;
@@ -374,8 +527,8 @@ export async function evaluateAnalysisOutcome(
         analysis.analysisId,
         analysis.symbol,
         'TP_HIT',
-        'TARGET REACHED',
-        `Take Profit target ${target} hit with +${(analysis.riskRewardRatio || 2).toFixed(1)}R return.`,
+        isRecoveryPass ? '[RECOVERED] TARGET REACHED' : 'TARGET REACHED',
+        `Take Profit target ${target} hit at ${candleTime.toUTCString()} (+${(analysis.riskRewardRatio || 2).toFixed(1)}R).`,
         target,
         analysis
       );
@@ -391,6 +544,7 @@ export async function evaluateAnalysisOutcome(
       analysis.outcome.stoppedOutAt = candleTime;
       analysis.outcome.triggerPrice = stop;
       analysis.outcome.observedPrice = stop;
+      analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
       analysis.outcome.maxAdverseExcursion = Number(mae.toFixed(5));
       analysis.outcome.timeToResolutionMinutes = Math.round((candleTime.getTime() - analysis.savedAt.getTime()) / 60000);
       analysis.outcome.triggerReason = `Stop loss price of ${stop} triggered`;
@@ -410,24 +564,23 @@ export async function evaluateAnalysisOutcome(
         analysis.analysisId,
         analysis.symbol,
         'SL_HIT',
-        'STOP LOSS TRIGGERED',
-        `Stop loss level ${stop} triggered. Trade closed at -1.0R.`,
+        isRecoveryPass ? '[RECOVERED] STOP LOSS TRIGGERED' : 'STOP LOSS TRIGGERED',
+        `Stop loss level ${stop} triggered at ${candleTime.toUTCString()} (-1.0R).`,
         stop,
         analysis
       );
       return;
     }
+
+    analysis.outcome.lastProcessedBarTimestamp = c.timestamp;
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 4. REAL-TIME TICK EVALUATION (Using Executable Bid/Ask)
+  // 5. REAL-TIME TICK EVALUATION (Using Executable Bid/Ask)
   // ──────────────────────────────────────────────────────────────────────────
 
   // ── TICK PRE-ENTRY EVALUATION ───────────────────────────────────────────
   if (!entryReached) {
-    // Executable Price Definitions:
-    // Long: Invalidation hits Bid; Entry triggers at Ask
-    // Short: Invalidation hits Ask; Entry triggers at Bid
     const liveInvalidationPrice = isBull ? currentBid : currentAsk;
     const liveEntryPrice = isBull ? currentAsk : currentBid;
 
@@ -438,6 +591,8 @@ export async function evaluateAnalysisOutcome(
     if (isLiveInvalidated) {
       const invalidReason = `Structural invalidation level (${invalidation}) breached in real-time (${isBull ? 'Bid' : 'Ask'}: ${liveInvalidationPrice}) before entry reached`;
       analysis.outcome.status = 'INVALIDATED';
+      analysis.outcome.isApproachingEntry = false;
+      analysis.outcome.entryApproachingNotified = false;
       analysis.outcome.invalidatedReason = invalidReason;
       analysis.outcome.resolvedAt = now;
       analysis.outcome.completedAt = now;
@@ -468,8 +623,45 @@ export async function evaluateAnalysisOutcome(
       return;
     }
 
-    // If NOT invalidated, evaluate live entry trigger
+    // If NOT invalidated, evaluate live entry trigger with PRE-ENTRY STRUCTURAL VALIDATION
     if (isLiveEntryReached) {
+      const validationResult = isSetupStillStructurallyValid(analysis, allCandlesSinceCreation, liveEntryPrice, now);
+
+      if (!validationResult.isValid) {
+        const invalidReason = validationResult.invalidationReason || 'Pre-entry structural validation failed';
+        analysis.outcome.status = 'INVALIDATED';
+        analysis.outcome.isApproachingEntry = false;
+        analysis.outcome.entryApproachingNotified = false;
+        analysis.outcome.invalidatedReason = invalidReason;
+        analysis.outcome.resolvedAt = now;
+        analysis.outcome.completedAt = now;
+        analysis.outcome.triggerPrice = entry;
+        analysis.outcome.observedPrice = liveEntryPrice;
+        analysis.outcome.timeToResolutionMinutes = Math.round((now.getTime() - analysis.savedAt.getTime()) / 60000);
+        analysis.outcome.monitoringStatus = 'Resolved: Invalidated (Stale Entry Protection)';
+        analysis.outcome.auditTrail.push({
+          previousStatus: currentStatus,
+          newStatus: 'INVALIDATED',
+          timestamp: now,
+          triggerPrice: entry,
+          triggerReason: invalidReason,
+          observedPrice: liveEntryPrice,
+        });
+        await analysis.save();
+
+        await telegramAlertDispatcher.dispatchLifecycleAlert(
+          analysis.analysisId,
+          analysis.symbol,
+          'INVALIDATED',
+          'SETUP INVALIDATED',
+          invalidReason,
+          liveEntryPrice,
+          analysis
+        );
+        return;
+      }
+
+      // Valid entry confirmed
       entryReached = true;
       analysis.outcome.entryReachedAt = now;
       analysis.outcome.status = 'ENTRY_REACHED';
@@ -552,7 +744,6 @@ export async function evaluateAnalysisOutcome(
 
   // ── TICK POST-ENTRY EVALUATION (Active Trade TP/SL) ──────────────────────
   if (entryReached) {
-    // Bullish positions exit at BID; Bearish positions exit at ASK
     const exitPrice = isBull ? currentBid : currentAsk;
     const isLiveTargetHit = isBull ? currentBid >= target : currentAsk <= target;
     const isLiveStopHit = isBull ? currentBid <= stop : currentAsk >= stop;
@@ -635,6 +826,33 @@ export async function evaluateAnalysisOutcome(
 }
 
 /**
+ * Reconnect Recovery Pass
+ */
+export async function runRecoveryReplay(): Promise<void> {
+  try {
+    const nonTerminalAnalyses = await Analysis.find({
+      'outcome.status': { $in: ['OPEN', 'WAITING_FOR_ENTRY', 'APPROACHING_ENTRY', 'ENTRY_REACHED', 'MONITORING_PAUSED'] },
+    });
+
+    if (nonTerminalAnalyses.length === 0) {
+      return;
+    }
+
+    console.log(`[Recovery] Running historical replay & offline recovery for ${nonTerminalAnalyses.length} active setups...`);
+    monitorHealth.lastRecoveryTimestamp = new Date().toISOString();
+
+    for (const analysis of nonTerminalAnalyses) {
+      await evaluateSingleAnalysis(analysis, true);
+    }
+
+    monitorHealth.totalRecoveredSetups += nonTerminalAnalyses.length;
+    console.log(`[Recovery] Historical replay completed successfully.`);
+  } catch (err) {
+    console.error('[Recovery] Reconnect recovery error:', err);
+  }
+}
+
+/**
  * Main polling iteration over all active & pending analyses
  */
 export async function runMonitoringCycle(): Promise<void> {
@@ -663,6 +881,7 @@ export function startOutcomeMonitor(intervalMs = 20000): void {
   if (monitorInterval) return;
   monitorHealth.isMonitorRunning = true;
   console.log(`[OutcomeMonitor] Background Lifecycle Worker initialized (interval: ${intervalMs / 1000}s)`);
+  setTimeout(runRecoveryReplay, 2000);
   setTimeout(runMonitoringCycle, 4000);
   monitorInterval = setInterval(runMonitoringCycle, intervalMs);
 }

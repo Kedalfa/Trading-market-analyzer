@@ -299,9 +299,15 @@ export interface TelegramStatusResponse {
   isConfigured: boolean;
   botUsername: string;
   isConnected: boolean;
+  isAuthorized: boolean;
+  sessionIsActive: boolean;
+  sessionExpiresAt?: string;
+  telegramUserId?: number;
   telegramUsername?: string;
   firstName?: string;
+  lastName?: string;
   connectedAt?: string;
+  lastActiveAt?: string;
   watchlist: string[];
   settings: {
     minQuality: 'HIGH' | 'HIGH_AND_WATCH';
@@ -313,20 +319,65 @@ export interface TelegramStatusResponse {
     accountBalance?: number;
     accountRiskPercent?: number;
   };
+  /** Active pending verification code — only present if a non-expired code exists */
+  activeCode?: {
+    code: string;
+    expiresAt: string;
+    directLink: string;
+    botUsername: string;
+    instructions: string;
+  } | null;
+}
+
+export interface TelegramAccountSummary {
+  internalUserId: string;
+  telegramUserId?: number;
+  chatId?: number;
+  telegramUsername?: string;
+  firstName?: string;
+  lastName?: string;
+  languageCode?: string;
+  isConnected: boolean;
+  isAuthorized: boolean;
+  sessionIsActive: boolean;
+  sessionExpiresAt?: string;
+  sessionExpiresInMs?: number | null;
+  connectedAt?: string;
+  lastActiveAt?: string;
+  authorizedAt?: string;
+  watchlist: string[];
+  isMuted: boolean;
+  failedAuthAttempts: number;
+  codeLockedUntil?: string;
+  verificationHistory: Array<{ timestamp: string; success: boolean; codeHashPrefix: string }>;
+}
+
+export interface TelegramAccountDetails extends TelegramAccountSummary {
+  linkedWebUserId?: string;
+  sessionCreatedAt?: string;
+  sessionLastActivityAt?: string;
+  settings: TelegramStatusResponse['settings'];
+  lastFailedAuthAt?: string;
+  totalAlertsSent: number;
+  totalAlertsFailed: number;
+  recentAlerts: Array<{ alertType: string; symbol: string; deliveryStatus: string; sentAt: string; message: string }>;
 }
 
 export async function fetchTelegramStatus(): Promise<TelegramStatusResponse> {
   return apiFetch<TelegramStatusResponse>('/api/telegram/status');
 }
 
-export async function generateTelegramCode(): Promise<{
+export async function generateTelegramCode(userId = 'user_1'): Promise<{
   code: string;
   expiresAt: string;
   directLink: string;
   botUsername: string;
   instructions: string;
 }> {
-  return apiFetch('/api/telegram/generate-code', { method: 'POST' });
+  return apiFetch('/api/telegram/generate-code', {
+    method: 'POST',
+    body: JSON.stringify({ userId }),
+  });
 }
 
 export async function disconnectTelegram(): Promise<{ success: boolean; message: string }> {
@@ -357,6 +408,20 @@ export async function fetchTelegramAlertLogs(): Promise<Array<{
   sentAt: string;
 }>> {
   return apiFetch('/api/telegram/alerts');
+}
+
+export async function fetchTelegramAccounts(): Promise<TelegramAccountSummary[]> {
+  const res = await apiFetch<{ data: TelegramAccountSummary[] }>('/api/telegram/accounts');
+  return (res as any).data ?? res;
+}
+
+export async function fetchTelegramAccountDetails(identifier: string | number): Promise<TelegramAccountDetails> {
+  const res = await apiFetch<{ data: TelegramAccountDetails }>(`/api/telegram/accounts/${identifier}`);
+  return (res as any).data ?? res;
+}
+
+export async function disconnectTelegramAccount(identifier: string | number): Promise<{ success: boolean; message: string }> {
+  return apiFetch(`/api/telegram/accounts/${identifier}/disconnect`, { method: 'POST' });
 }
 
 // ────────────────────────────────────────────────
